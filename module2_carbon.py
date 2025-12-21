@@ -1,0 +1,58 @@
+from flask import Blueprint, request, jsonify
+from db import get_connection
+
+carbon_bp = Blueprint("carbon", __name__)
+
+def save_carbon_footprint(fertilizer, diesel, electricity, total_co2, status):
+    """Save carbon footprint data to MySQL"""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO carbon_footprint (fertilizer, diesel, electricity, total_co2, status)
+        VALUES (%s, %s, %s, %s, %s)
+    """, (fertilizer, diesel, electricity, total_co2, status))
+    conn.commit()
+    conn.close()
+
+@carbon_bp.route("/carbon-footprint", methods=["POST"])
+def calculate_carbon():
+    data = request.json or {}
+    
+    try:
+        fertilizer = float(data.get("fertilizer", 0) or 0)
+        diesel = float(data.get("diesel", 0) or 0)
+        electricity = float(data.get("electricity", 0) or 0)
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid numeric input"}), 400
+
+    # Emission factors (kg CO2 per unit)
+    co2_fertilizer = fertilizer * 1.3
+    co2_diesel = diesel * 2.68
+    co2_electricity = electricity * 0.82
+
+    total_co2 = round(
+        co2_fertilizer + co2_diesel + co2_electricity, 2
+    )
+
+    if total_co2 < 50:
+        status = "Low"
+    elif total_co2 < 150:
+        status = "Medium"
+    else:
+        status = "High"
+
+    # ✅ SAVE TO DATABASE
+    save_carbon_footprint(fertilizer, diesel, electricity, total_co2, status)
+
+    return jsonify({
+        "fertilizer_co2": round(co2_fertilizer, 2),
+        "diesel_co2": round(co2_diesel, 2),
+        "electricity_co2": round(co2_electricity, 2),
+        "total_co2": total_co2,
+        "status": status,
+        "suggestions": [
+            "Use organic manure",
+            "Adopt solar-powered pumps",
+            "Reduce chemical fertilizer usage"
+        ]
+    })
