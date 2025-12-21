@@ -1,22 +1,32 @@
 from flask import Blueprint, request, jsonify
-from db import get_connection
+import logging
 
+logger = logging.getLogger(__name__)
 carbon_bp = Blueprint("carbon", __name__)
 
 def save_carbon_footprint(fertilizer, diesel, electricity, total_co2, status):
-    """Save carbon footprint data to MySQL"""
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO carbon_footprint (fertilizer, diesel, electricity, total_co2, status)
-        VALUES (%s, %s, %s, %s, %s)
-    """, (fertilizer, diesel, electricity, total_co2, status))
-    conn.commit()
-    conn.close()
+    """Save carbon footprint data to MySQL (Non-blocking for Vercel)"""
+    try:
+        from db import get_connection
+        conn = get_connection()
+        if conn is not None:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO carbon_footprint (fertilizer, diesel, electricity, total_co2, status)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (fertilizer, diesel, electricity, total_co2, status))
+            conn.commit()
+            conn.close()
+            logger.info("✅ Carbon data saved to DB")
+        else:
+            logger.info("⚠️ No DB connection - continuing without save")
+    except Exception as e:
+        logger.error(f"DB save failed (non-critical): {str(e)}")
+        # Continue without crashing - Vercel serverless!
 
 @carbon_bp.route("/carbon-footprint", methods=["POST"])
 def calculate_carbon():
-    data = request.json or {}
+    data = request.get_json() or {}
     
     try:
         fertilizer = float(data.get("fertilizer", 0) or 0)
@@ -41,7 +51,7 @@ def calculate_carbon():
     else:
         status = "High"
 
-    # ✅ SAVE TO DATABASE
+    # ✅ SAVE TO DATABASE (Non-blocking)
     save_carbon_footprint(fertilizer, diesel, electricity, total_co2, status)
 
     return jsonify({
