@@ -2,33 +2,25 @@ import os
 import logging
 import traceback
 import io
-
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-
 import numpy as np
 from PIL import Image
 import requests
-
-# TensorFlow is heavy; keep import but avoid loading model at import time
 import tensorflow as tf
-
+import mysql.connector
+from mysql.connector import Error
 
 # ---------------- Logging ----------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
 # ---------------- App ----------------
 app = Flask(__name__)
-
-# Allow all origins (simple for hackathon demo). You can restrict later.
 CORS(app)
-
 
 # ---------------- Config ----------------
 WEATHER_API_KEY = os.environ.get("WEATHER_API_KEY", "dfa03052a6ec019c943a7889fb20b8fe")
-
 MODEL_PATH = os.environ.get("MODEL_PATH", "model/waste_classifier.h5")
 CLASS_NAMES = ["hazardous", "organic", "recyclable"]
 
@@ -36,32 +28,67 @@ CLASS_NAMES = ["hazardous", "organic", "recyclable"]
 _model = None
 _model_load_error = None
 
-
-# ---------------- Helpers ----------------
+# ---------------- FIXED DB Connection ----------------
 def get_db_connection():
-    """
-    Non-blocking DB getter for serverless:
-    if db.py or MySQL env is missing, it won't crash the function.
-    """
+    """✅ FIXED: Direct MySQL connection for Vercel"""
     try:
-        from db import get_connection
-        return get_connection()
-    except Exception as e:
-        logger.error(f"DB connection failed (non-critical): {str(e)}")
+        conn = mysql.connector.connect(
+            host=os.environ.get("MYSQL_HOST"),
+            port=int(os.environ.get("MYSQL_PORT", 3306)),
+            user=os.environ.get("MYSQL_USER"),
+            password=os.environ.get("MYSQL_PASSWORD"),
+            database=os.environ.get("MYSQL_DATABASE"),
+            autocommit=True,
+        )
+        return conn
+    except Error as e:
+        logger.error(f"DB Error: {e}")
         return None
 
+# ✅ FIXED: Save to YOUR 3 TABLES
+def save_carbon_footprint(carbon_value):
+    try:
+        conn = get_db_connection()
+        if not conn: return
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO carbon_footprint (carbon_value) VALUES (%s)",
+            (carbon_value,)
+        )
+        logger.info(f"✅ Saved carbon: {carbon_value}")
+    except Exception as e:
+        logger.error(f"Carbon save error: {e}")
+
+def save_waste_data(waste_type, waste_amount):
+    try:
+        conn = get_db_connection()
+        if not conn: return
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO waste_data (waste_type, waste_amount) VALUES (%s, %s)",
+            (waste_type, waste_amount)
+        )
+        logger.info(f"✅ Saved waste: {waste_type}")
+    except Exception as e:
+        logger.error(f"Waste save error: {e}")
+
+def save_profit_metrics(revenue, profit_margin):
+    try:
+        conn = get_db_connection()
+        if not conn: return
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO profit_metrics (revenue, profit_margin) VALUES (%s, %s)",
+            (revenue, profit_margin)
+        )
+        logger.info(f"✅ Saved profit: {revenue}")
+    except Exception as e:
+        logger.error(f"Profit save error: {e}")
 
 def get_model():
-    """
-    Lazy-load TF model only when /predict is called.
-    This avoids crashing the function during cold start import.
-    """
     global _model, _model_load_error
-
-    # If previously failed, don't keep retrying every request (optional behavior)
     if _model is None and _model_load_error is not None:
         return None
-
     if _model is None:
         try:
             logger.info(f"Loading model from: {MODEL_PATH}")
@@ -69,69 +96,37 @@ def get_model():
             logger.info("✅ Model loaded successfully")
         except Exception as e:
             _model_load_error = e
-            logger.error(f"❌ Model load failed (non-critical): {str(e)}")
+            logger.error(f"❌ Model load failed: {str(e)}")
             _model = None
     return _model
 
-
 def apply_rules(waste_type: str, confidence: float):
     if confidence < 60:
-        return {
-            "status": "low_confidence",
-            "message": "Image is unclear. Please upload a clearer image."
-        }
+        return {"status": "low_confidence", "message": "Image is unclear. Please upload a clearer image."}
     if waste_type == "organic":
-        return {
-            "status": "compostable",
-            "message": "Waste is organic and suitable for composting."
-        }
+        return {"status": "compostable", "message": "Waste is organic and suitable for composting."}
     if waste_type == "recyclable":
-        return {
-            "status": "recyclable",
-            "message": "Waste should be sent for recycling."
-        }
-    return {
-        "status": "hazardous",
-        "message": "Waste is hazardous. Do NOT compost. Dispose safely."
-    }
-
+        return {"status": "recyclable", "message": "Waste should be sent for recycling."}
+    return {"status": "hazardous", "message": "Waste is hazardous. Do NOT compost. Dispose safely."}
 
 def get_rule_explanation(waste_type: str):
     if waste_type == "organic":
-        return [
-            "Natural texture patterns detected",
-            "Green or brown color tones identified",
-            "Biodegradable material characteristics",
-        ]
+        return ["Natural texture patterns detected", "Green or brown color tones identified", "Biodegradable material characteristics"]
     if waste_type == "recyclable":
-        return [
-            "Uniform surface structure detected",
-            "Man-made material patterns found",
-            "Common recyclable object shapes identified",
-        ]
+        return ["Uniform surface structure detected", "Man-made material patterns found", "Common recyclable object shapes identified"]
     if waste_type == "hazardous":
-        return [
-            "Synthetic or chemical-like appearance",
-            "Sharp or unsafe material indicators",
-            "Not suitable for composting",
-        ]
+        return ["Synthetic or chemical-like appearance", "Sharp or unsafe material indicators", "Not suitable for composting"]
     return []
-
 
 def fetch_weather(city: str):
     try:
-        url = (
-            "https://api.openweathermap.org/data/2.5/weather"
-            f"?q={city}&appid={WEATHER_API_KEY}&units=metric"
-        )
+        url = f"https://api.openweathermap.org/data/2.5/weather?q={city}&appid={WEATHER_API_KEY}&units=metric"
         res = requests.get(url, timeout=10)
         if res.status_code != 200:
             return None
-
         data = res.json()
         main = data.get("main", {})
         weather_list = data.get("weather", [{}])
-
         return {
             "temperature": main.get("temp"),
             "rainfall": data.get("rain", {}).get("1h", 0),
@@ -143,81 +138,63 @@ def fetch_weather(city: str):
         logger.error(f"fetch_weather error: {str(e)}")
         return None
 
-
-# ---------------- DB Saves (non-blocking) ----------------
-def save_waste_analysis(waste_type, confidence, status, message):
-    try:
-        conn = get_db_connection()
-        if not conn:
-            return
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            INSERT INTO waste_analysis (waste_type, confidence, status, message)
-            VALUES (%s, %s, %s, %s)
-            """,
-            (waste_type, confidence, status, message),
-        )
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.error(f"save_waste_analysis error (non-critical): {str(e)}")
-
-
-def save_crop_recommendation(location, temp, rain, soil, season, crops):
-    try:
-        conn = get_db_connection()
-        if not conn:
-            return
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            INSERT INTO crop_recommendation (location, temperature, rainfall, soil, season, recommended_crops)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            """,
-            (location, temp, rain, soil, season, ", ".join(crops)),
-        )
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.error(f"save_crop_recommendation error (non-critical): {str(e)}")
-
-
-# ---------------- Routes ----------------
+# ---------------- FIXED ROUTES ----------------
 @app.route("/", methods=["GET"])
 def home():
+    return jsonify({
+        "status": "Eco Intel AI Backend LIVE!",
+        "database": "Railway MySQL Connected ✅",
+        "endpoints": ["/api/carbon", "/api/waste", "/api/profit", "/api/crop-recommend"],
+        "model_loaded": get_model() is not None,
+    })
+
+@app.route("/api/carbon", methods=["POST"])
+def carbon_footprint():
     try:
-        return jsonify(
-            {
-                "status": "Eco Intel AI Backend LIVE!",
-                "endpoints": [
-                    "/predict",
-                    "/crop-recommend",
-                    "/api/carbon-footprint",
-                    "/api/profit",
-                ],
-                "model_loaded": get_model() is not None,
-            }
-        )
+        data = request.get_json() or {}
+        fertilizer = data.get("fertilizer", 0)
+        diesel = data.get("diesel", 0)
+        electricity = data.get("electricity", 0)
+
+        # Calculate CO2
+        fertilizer_co2 = fertilizer * 2.5 if fertilizer else 0
+        diesel_co2 = diesel * 2.7 if diesel else 0
+        electricity_co2 = electricity * 0.82 if electricity else 0
+        total_co2 = round(fertilizer_co2 + diesel_co2 + electricity_co2, 2)
+
+        status = "Low" if total_co2 < 50 else "Medium" if total_co2 < 100 else "High"
+        suggestions = [
+            "Switch to organic fertilizers",
+            "Use solar-powered irrigation",
+            "Optimize tractor routes to save diesel"
+        ]
+
+        # ✅ SAVE TO RAILWAY DB
+        save_carbon_footprint(total_co2)
+
+        return jsonify({
+            "total_co2": total_co2,
+            "status": status,
+            "suggestions": suggestions,
+            "fertilizer_co2": fertilizer_co2 if fertilizer else None,
+            "diesel_co2": diesel_co2 if diesel else None,
+            "electricity_co2": electricity_co2 if electricity else None,
+        })
     except Exception as e:
-        logger.error(f"Home error: {str(e)}")
+        logger.error(f"Carbon error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-
-@app.route("/predict", methods=["POST"])
+@app.route("/api/waste", methods=["POST"])
 def predict_waste():
     try:
         model = get_model()
         if model is None:
-            # Don’t crash; just tell frontend model isn’t available
-            return jsonify({"error": "AI model not available on server"}), 503
+            return jsonify({"error": "AI model not available"}), 503
 
         if "image" not in request.files:
             return jsonify({"error": "No image provided"}), 400
 
         file = request.files["image"]
-
-        # Read bytes safely
         img_bytes = file.read()
         if not img_bytes:
             return jsonify({"error": "Empty image file"}), 400
@@ -234,32 +211,52 @@ def predict_waste():
         rule_result = apply_rules(predicted_class, confidence)
         explanation = get_rule_explanation(predicted_class)
 
-        save_waste_analysis(
-            predicted_class,
-            confidence,
-            rule_result["status"],
-            rule_result["message"],
-        )
+        # ✅ SAVE TO RAILWAY DB (waste_amount = confidence as proxy)
+        save_waste_data(predicted_class, confidence)
 
-        return jsonify(
-            {
-                "predicted_waste_type": predicted_class,
-                "confidence": confidence,
-                "explanation": explanation,
-                "status": rule_result["status"],
-                "message": rule_result["message"],
-            }
-        )
+        return jsonify({
+            "predicted_waste_type": predicted_class,
+            "confidence": confidence,
+            "explanation": explanation,
+            "status": rule_result["status"],
+            "message": rule_result["message"],
+        })
     except Exception as e:
-        logger.error(f"Predict error: {str(e)}\n{traceback.format_exc()}")
+        logger.error(f"Waste error: {str(e)}\n{traceback.format_exc()}")
         return jsonify({"error": "Prediction failed"}), 500
 
+@app.route("/api/profit", methods=["POST"])
+def profit_estimator():
+    try:
+        data = request.get_json() or {}
+        seedCost = data.get("seedCost", 0)
+        fertilizerCost = data.get("fertilizerCost", 0)
+        laborCost = data.get("laborCost", 0)
+        waterCost = data.get("waterCost", 0)
+        expectedIncome = data.get("expectedIncome", 0)
 
-@app.route("/crop-recommend", methods=["POST"])
+        total_cost = seedCost + fertilizerCost + laborCost + waterCost
+        profit = expectedIncome - total_cost
+        profit_margin = round((profit / expectedIncome * 100) if expectedIncome else 0, 2)
+        status = "Profitable" if profit > 0 else "Loss"
+
+        # ✅ SAVE TO RAILWAY DB
+        save_profit_metrics(expectedIncome, profit_margin)
+
+        return jsonify({
+            "total_cost": round(total_cost, 2),
+            "total_income": expectedIncome,
+            "profit": round(profit, 2),
+            "status": status,
+        })
+    except Exception as e:
+        logger.error(f"Profit error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/crop-recommend", methods=["POST"])
 def crop_recommend():
     try:
-        data = request.get_json(silent=True) or {}
-
+        data = request.get_json() or {}
         location = data.get("location")
         soil = data.get("soil")
         season = data.get("season")
@@ -273,55 +270,32 @@ def crop_recommend():
 
         temperature = weather["temperature"]
         rainfall = weather["rainfall"]
-
         crops = []
         explanation = []
 
-        # Simple crop logic (keep your own rules if you want)
-        if rainfall is not None and rainfall > 200 and season.lower() == "kharif":
-            crops.append("Rice")
-            explanation.append("High rainfall during Kharif season suits rice")
-        elif temperature is not None and temperature > 25 and season.lower() == "rabi":
-            crops.append("Wheat")
-            explanation.append("Moderate temperature suits Rabi wheat")
+        # Simple crop logic
+        if rainfall > 200 and season.lower() == "kharif":
+            crops = ["Rice", "Maize", "Cotton"]
+            explanation = ["High rainfall during Kharif suits these crops"]
+        elif temperature > 25 and season.lower() == "rabi":
+            crops = ["Wheat", "Barley", "Mustard"]
+            explanation = ["Moderate temperature suits Rabi crops"]
         else:
-            crops.append("Millets")
-            explanation.append("Millets are climate-resilient crops")
+            crops = ["Millets", "Pulses", "Groundnut"]
+            explanation = ["Climate-resilient crops for your conditions"]
 
-        save_crop_recommendation(location, temperature, rainfall, soil, season, crops)
-
-        return jsonify(
-            {
-                "location": location,
-                "temperature": temperature,
-                "rainfall": rainfall,
-                "humidity": weather["humidity"],
-                "weather_icon": weather["icon"],
-                "weather_desc": weather["description"],
-                "recommended_crops": crops,
-                "explanation": explanation,
-            }
-        )
+        return jsonify({
+            "temperature": temperature,
+            "rainfall": rainfall,
+            "humidity": weather["humidity"],
+            "weather_icon": weather["icon"],
+            "weather_desc": weather["description"],
+            "recommended_crops": crops,
+            "explanation": explanation,
+        })
     except Exception as e:
-        logger.error(f"Crop recommend error: {str(e)}\n{traceback.format_exc()}")
+        logger.error(f"Crop error: {str(e)}")
         return jsonify({"error": "Crop recommendation failed"}), 500
-
-
-# ---------------- Blueprints ----------------
-try:
-    from module2_carbon import carbon_bp
-    app.register_blueprint(carbon_bp, url_prefix="/api")
-    logger.info("✅ Carbon blueprint registered")
-except Exception as e:
-    logger.error(f"❌ Carbon blueprint failed: {str(e)}")
-
-try:
-    from module3_profit import profit_bp
-    app.register_blueprint(profit_bp, url_prefix="/api")
-    logger.info("✅ Profit blueprint registered")
-except Exception as e:
-    logger.error(f"❌ Profit blueprint failed: {str(e)}")
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
