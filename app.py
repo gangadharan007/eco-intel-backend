@@ -16,10 +16,18 @@ logger = logging.getLogger(__name__)
 
 # ---------------- App ----------------
 app = Flask(__name__)
-CORS(app)
+
+# ✅ CORS: allow your frontend to call /api/*
+CORS(
+    app,
+    resources={r"/api/*": {"origins": "https://eco-intel-frontend.vercel.app"}},
+    supports_credentials=False,
+)
 
 # ---------------- Config ----------------
-WEATHER_API_KEY = os.environ.get("WEATHER_API_KEY", "dfa03052a6ec019c943a7889fb20b8fe")
+WEATHER_API_KEY = os.environ.get(
+    "WEATHER_API_KEY", "dfa03052a6ec019c943a7889fb20b8fe"
+)
 
 # ---------------- DB Connection ----------------
 def get_db_connection():
