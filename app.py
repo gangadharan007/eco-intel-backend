@@ -4,22 +4,20 @@ import traceback
 from urllib.parse import urlparse
 from datetime import date, timedelta
 
-from flask import Flask, request, jsonify
-from flask_cors import CORS
 import requests
 import mysql.connector
 from mysql.connector import Error
-
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 
 # ---------------- Logging ----------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
 # ---------------- App ----------------
 app = Flask(__name__)
 
-# ✅ CORS: allow your frontend to call /api/*
+# CORS for frontend -> backend /api/*
 CORS(
     app,
     resources={r"/api/*": {"origins": "https://eco-intel-frontend.vercel.app"}},
@@ -27,9 +25,12 @@ CORS(
 )
 
 # ---------------- Config ----------------
-WEATHER_API_KEY = os.environ.get("WEATHER_API_KEY", "")
-WASTE_AI_URL = os.environ.get("WASTE_AI_URL", "").rstrip("/")
+WEATHER_API_KEY = os.environ.get("WEATHER_API_KEY", "").strip()
+WASTE_AI_URL = os.environ.get("WASTE_AI_URL", "").rstrip("/").strip()
 
+OPENWEATHER_WEATHER_URL = "https://api.openweathermap.org/data/2.5/weather"  # [web:1558]
+OPENWEATHER_GEO_URL = "https://api.openweathermap.org/geo/1.0/direct"        # [web:1563]
+NASA_POWER_DAILY_POINT_URL = "https://power.larc.nasa.gov/api/temporal/daily/point"  # [web:1567]
 
 # ---------------- DB Connection ----------------
 def _conn_from_mysql_url(mysql_url: str):
@@ -50,7 +51,6 @@ def _conn_from_mysql_url(mysql_url: str):
         autocommit=True,
     )
 
-
 def get_db_connection():
     """Direct MySQL connection for Vercel (Railway DB)."""
     try:
@@ -58,7 +58,6 @@ def get_db_connection():
         if mysql_url:
             return _conn_from_mysql_url(mysql_url)
 
-        # Fallback to separate env vars
         return mysql.connector.connect(
             host=os.environ.get("MYSQL_HOST"),
             port=int(os.environ.get("MYSQL_PORT", 3306)),
@@ -74,166 +73,142 @@ def get_db_connection():
         logger.error(f"DB Parse/Error: {e}")
         return None
 
-
 # ---------------- DB Save Helpers ----------------
 def save_carbon_footprint(carbon_value: float):
     try:
         conn = get_db_connection()
         if not conn:
             return
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO carbon_footprint (carbon_value) VALUES (%s)",
-            (carbon_value,),
-        )
-        cursor.close()
+        cur = conn.cursor()
+        cur.execute("INSERT INTO carbon_footprint (carbon_value) VALUES (%s)", (carbon_value,))
+        cur.close()
         conn.close()
-        logger.info(f"✅ Saved carbon: {carbon_value}")
+        logger.info("✅ Saved carbon: %s", carbon_value)
     except Exception as e:
-        logger.error(f"Carbon save error: {e}")
-
+        logger.error("Carbon save error: %s", e)
 
 def save_waste_data(waste_type: str, waste_amount: float):
     try:
         conn = get_db_connection()
         if not conn:
             return
-        cursor = conn.cursor()
-        cursor.execute(
+        cur = conn.cursor()
+        cur.execute(
             "INSERT INTO waste_data (waste_type, waste_amount) VALUES (%s, %s)",
             (waste_type, waste_amount),
         )
-        cursor.close()
+        cur.close()
         conn.close()
-        logger.info(f"✅ Saved waste: {waste_type}")
+        logger.info("✅ Saved waste: %s", waste_type)
     except Exception as e:
-        logger.error(f"Waste save error: {e}")
-
+        logger.error("Waste save error: %s", e)
 
 def save_profit_metrics(revenue: float, profit_margin: float):
     try:
         conn = get_db_connection()
         if not conn:
             return
-        cursor = conn.cursor()
-        cursor.execute(
+        cur = conn.cursor()
+        cur.execute(
             "INSERT INTO profit_metrics (revenue, profit_margin) VALUES (%s, %s)",
             (revenue, profit_margin),
         )
-        cursor.close()
+        cur.close()
         conn.close()
-        logger.info(f"✅ Saved profit: {revenue}")
+        logger.info("✅ Saved profit: %s", revenue)
     except Exception as e:
-        logger.error(f"Profit save error: {e}")
-
+        logger.error("Profit save error: %s", e)
 
 def save_crop_recommendation(location: str, soil: str, season: str, avg_temp_30d: float, rain_30d: float, humidity: int, crops: list):
-    """
-    Optional DB save. Create the table if you want to store results:
-
-    CREATE TABLE crop_recommendations (
-      id INT AUTO_INCREMENT PRIMARY KEY,
-      location VARCHAR(100),
-      soil VARCHAR(30),
-      season VARCHAR(20),
-      avg_temp_30d FLOAT,
-      rain_30d_mm FLOAT,
-      humidity INT,
-      crops_json TEXT,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-    """
     try:
         conn = get_db_connection()
         if not conn:
             return
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO crop_recommendations (location, soil, season, avg_temp_30d, rain_30d_mm, humidity, crops_json) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+            "INSERT INTO crop_recommendations (location, soil, season, avg_temp_30d, rain_30d_mm, humidity, crops_json) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s)",
             (location, soil, season, avg_temp_30d, rain_30d, humidity, str(crops)),
         )
         cur.close()
         conn.close()
         logger.info("✅ Saved crop recommendation to DB")
     except Exception:
-        # If table doesn't exist, ignore (keeps API working).
+        # ignore if table doesn't exist
         pass
-
 
 # ---------------- Weather + Geo Helpers ----------------
 def fetch_weather(city: str):
     """
-    OpenWeather current weather endpoint (temp, humidity, icon, description).
-    Rain data here is only for last 1h/3h when it is raining. [web:1022]
+    OpenWeather current weather endpoint. Use units=metric for Celsius. [web:1558]
     """
+    if not WEATHER_API_KEY:
+        return {"_error": "WEATHER_API_KEY not set on backend"}
+
     try:
-        if not WEATHER_API_KEY:
-            return None
+        params = {"q": city, "appid": WEATHER_API_KEY, "units": "metric"}  # units supported by API [web:1558]
+        r = requests.get(OPENWEATHER_WEATHER_URL, params=params, timeout=12)
+        if r.status_code != 200:
+            logger.error("OpenWeather /weather failed (%s): %s", r.status_code, r.text[:200])
+            return {"_error": "OpenWeather weather failed", "status": r.status_code}
 
-        url = (
-            "https://api.openweathermap.org/data/2.5/weather"
-            f"?q={city}&appid={WEATHER_API_KEY}&units=metric"
-        )
-        res = requests.get(url, timeout=10)
-        if res.status_code != 200:
-            return None
-
-        data = res.json()
-        main = data.get("main", {})
-        weather_list = data.get("weather", [{}])
+        data = r.json()
+        main = data.get("main", {}) or {}
+        weather_list = data.get("weather", [{}]) or [{}]
 
         rain = data.get("rain", {}) or {}
         rain_mm = rain.get("1h") or rain.get("3h") or 0
 
         return {
             "temperature": main.get("temp"),
-            "rain_1h_or_3h": rain_mm,
             "humidity": main.get("humidity"),
             "icon": weather_list[0].get("icon"),
             "description": weather_list[0].get("description"),
+            "rain_1h_or_3h": rain_mm,
         }
     except Exception as e:
-        logger.error(f"fetch_weather error: {str(e)}")
-        return None
-
+        logger.error("fetch_weather error: %s\n%s", str(e), traceback.format_exc())
+        return {"_error": "fetch_weather exception", "detail": str(e)}
 
 def geocode_city(city: str):
     """
-    Use OpenWeather geocoding: city -> lat/lon.
+    OpenWeather geocoding: /geo/1.0/direct?q=...&limit=1&appid=... [web:1563]
     """
-    try:
-        if not WEATHER_API_KEY:
-            return None
+    if not WEATHER_API_KEY:
+        return {"_error": "WEATHER_API_KEY not set on backend"}
 
-        url = "https://api.openweathermap.org/geo/1.0/direct"
-        params = {"q": city, "limit": 1, "appid": WEATHER_API_KEY}
-        r = requests.get(url, params=params, timeout=10)
+    try:
+        params = {"q": city, "limit": 1, "appid": WEATHER_API_KEY}  # [web:1563]
+        r = requests.get(OPENWEATHER_GEO_URL, params=params, timeout=12)
         if r.status_code != 200:
-            return None
+            logger.error("OpenWeather geocode failed (%s): %s", r.status_code, r.text[:200])
+            return {"_error": "OpenWeather geocode failed", "status": r.status_code}
+
         arr = r.json()
         if not arr:
-            return None
+            return {"_error": "No geocode results"}
+
         return {
             "lat": float(arr[0]["lat"]),
             "lon": float(arr[0]["lon"]),
             "name": arr[0].get("name") or city,
+            "country": arr[0].get("country"),
+            "state": arr[0].get("state"),
         }
     except Exception as e:
-        logger.error(f"geocode_city error: {e}")
-        return None
-
+        logger.error("geocode_city error: %s\n%s", str(e), traceback.format_exc())
+        return {"_error": "geocode_city exception", "detail": str(e)}
 
 # ---------------- NASA POWER Climate Helper ----------------
 def fetch_nasa_power_last30(lat: float, lon: float):
     """
-    NASA POWER daily API: compute last 30 days total rainfall (PRECTOT) and average temp (T2M). [web:1052]
-    Parameters reference. [web:1037]
+    NASA POWER Daily API: temporal/daily/point
+    parameters: T2M,PRECTOT and community=AG and format=JSON. [web:1567]
     """
     try:
         end = date.today()
         start = end - timedelta(days=30)
 
-        url = "https://power.larc.nasa.gov/api/temporal/daily/point"
         params = {
             "latitude": lat,
             "longitude": lon,
@@ -244,10 +219,10 @@ def fetch_nasa_power_last30(lat: float, lon: float):
             "parameters": "T2M,PRECTOT",
         }
 
-        r = requests.get(url, params=params, timeout=20)
+        r = requests.get(NASA_POWER_DAILY_POINT_URL, params=params, timeout=25)
         if r.status_code != 200:
-            logger.error(f"NASA POWER status {r.status_code}: {r.text[:200]}")
-            return None
+            logger.error("NASA POWER failed (%s): %s", r.status_code, r.text[:200])
+            return {"_error": "NASA POWER failed", "status": r.status_code}
 
         j = r.json()
         props = (j.get("properties") or {})
@@ -255,115 +230,33 @@ def fetch_nasa_power_last30(lat: float, lon: float):
         t2m = (param.get("T2M") or {})
         prec = (param.get("PRECTOT") or {})
 
-        temps = []
-        rains = []
-
-        for _, v in t2m.items():
-            if v is None:
-                continue
-            try:
-                temps.append(float(v))
-            except Exception:
-                pass
-
-        for _, v in prec.items():
-            if v is None:
-                continue
-            try:
-                rains.append(float(v))
-            except Exception:
-                pass
+        temps = [float(v) for v in t2m.values() if v is not None]
+        rains = [float(v) for v in prec.values() if v is not None]
 
         if not temps or not rains:
-            return None
+            return {"_error": "NASA POWER missing data"}
 
         avg_temp = sum(temps) / len(temps)
         total_rain = sum(rains)
 
-        return {
-            "avg_temp_30d": round(avg_temp, 2),
-            "rain_30d": round(total_rain, 2),
-        }
+        return {"avg_temp_30d": round(avg_temp, 2), "rain_30d": round(total_rain, 2)}
     except Exception as e:
-        logger.error(f"fetch_nasa_power_last30 error: {e}")
-        return None
+        logger.error("fetch_nasa_power_last30 error: %s\n%s", str(e), traceback.format_exc())
+        return {"_error": "fetch_nasa_power_last30 exception", "detail": str(e)}
 
-
-# ---------------- Crop Rules (extend this list) ----------------
-# NOTE: For “mostly all crops”, later import FAO ECOCROP dataset and score all crops from it. [web:1036]
+# ---------------- Crop Rules ----------------
 CROP_RULES = {
-    "Rice": {
-        "seasons": {"kharif"},
-        "soils": {"clay", "loamy"},
-        "t": (20, 35),
-        "r30": (120, 500),
-        "reason": "Warm conditions and higher water availability suit rice.",
-    },
-    "Maize": {
-        "seasons": {"kharif", "rabi"},
-        "soils": {"loamy", "sandy"},
-        "t": (18, 34),
-        "r30": (50, 250),
-        "reason": "Maize performs well in warm weather with moderate rainfall.",
-    },
-    "Cotton": {
-        "seasons": {"kharif"},
-        "soils": {"loamy", "clay", "sandy"},
-        "t": (20, 35),
-        "r30": (30, 200),
-        "reason": "Cotton prefers warm temperatures and moderate moisture.",
-    },
-    "Wheat": {
-        "seasons": {"rabi"},
-        "soils": {"loamy"},
-        "t": (10, 25),
-        "r30": (10, 120),
-        "reason": "Cooler season with low-to-moderate rainfall suits wheat.",
-    },
-    "Barley": {
-        "seasons": {"rabi"},
-        "soils": {"loamy", "sandy"},
-        "t": (7, 25),
-        "r30": (10, 100),
-        "reason": "Barley tolerates cooler conditions and lower rainfall.",
-    },
-    "Mustard": {
-        "seasons": {"rabi"},
-        "soils": {"loamy", "sandy"},
-        "t": (10, 25),
-        "r30": (5, 80),
-        "reason": "Mustard suits cool weather and relatively dry conditions.",
-    },
-    "Groundnut": {
-        "seasons": {"kharif", "summer"},
-        "soils": {"sandy", "loamy"},
-        "t": (20, 33),
-        "r30": (20, 150),
-        "reason": "Groundnut prefers warm weather and well-drained soils.",
-    },
-    "Sugarcane": {
-        "seasons": {"kharif", "summer"},
-        "soils": {"clay", "loamy"},
-        "t": (20, 35),
-        "r30": (80, 400),
-        "reason": "Sugarcane needs warmth and higher water availability.",
-    },
-    "Millets": {
-        "seasons": {"kharif", "summer"},
-        "soils": {"sandy", "loamy"},
-        "t": (20, 38),
-        "r30": (5, 120),
-        "reason": "Millets are resilient in heat and low rainfall.",
-    },
-    "Pulses": {
-        "seasons": {"kharif", "rabi"},
-        "soils": {"loamy", "sandy"},
-        "t": (15, 32),
-        "r30": (5, 120),
-        "reason": "Many pulses fit moderate temperatures and low-to-moderate rainfall.",
-    },
+    "Rice": {"seasons": {"kharif"}, "soils": {"clay", "loamy"}, "t": (20, 35), "r30": (120, 500), "reason": "Warm + higher water availability suits rice."},
+    "Maize": {"seasons": {"kharif", "rabi"}, "soils": {"loamy", "sandy"}, "t": (18, 34), "r30": (50, 250), "reason": "Warm weather with moderate rainfall suits maize."},
+    "Cotton": {"seasons": {"kharif"}, "soils": {"loamy", "clay", "sandy"}, "t": (20, 35), "r30": (30, 200), "reason": "Warm temperatures and moderate moisture suit cotton."},
+    "Wheat": {"seasons": {"rabi"}, "soils": {"loamy"}, "t": (10, 25), "r30": (10, 120), "reason": "Cooler season + low/moderate rainfall suits wheat."},
+    "Barley": {"seasons": {"rabi"}, "soils": {"loamy", "sandy"}, "t": (7, 25), "r30": (10, 100), "reason": "Cooler conditions + lower rainfall suits barley."},
+    "Mustard": {"seasons": {"rabi"}, "soils": {"loamy", "sandy"}, "t": (10, 25), "r30": (5, 80), "reason": "Cool + relatively dry conditions suit mustard."},
+    "Groundnut": {"seasons": {"kharif", "summer"}, "soils": {"sandy", "loamy"}, "t": (20, 33), "r30": (20, 150), "reason": "Warm + well-drained soils suit groundnut."},
+    "Sugarcane": {"seasons": {"kharif", "summer"}, "soils": {"clay", "loamy"}, "t": (20, 35), "r30": (80, 400), "reason": "Warm + higher water availability suits sugarcane."},
+    "Millets": {"seasons": {"kharif", "summer"}, "soils": {"sandy", "loamy"}, "t": (20, 38), "r30": (5, 120), "reason": "Heat + low rainfall resilience suits millets."},
+    "Pulses": {"seasons": {"kharif", "rabi"}, "soils": {"loamy", "sandy"}, "t": (15, 32), "r30": (5, 120), "reason": "Many pulses fit moderate temps + low/mod rainfall."},
 }
-
 
 def score_crop(rule, t, r30, soil, season):
     if season not in rule["seasons"]:
@@ -389,27 +282,18 @@ def score_crop(rule, t, r30, soil, season):
     score -= abs(r30 - rmid) * 0.3
     return round(score, 2)
 
-
 # ---------------- Routes ----------------
-@app.route("/", methods=["GET"])
-def home():
+@app.get("/")
+def root():
     return jsonify(
         {
             "status": "Eco Intel AI Backend LIVE!",
-            "database": "Railway MySQL via mysql.connector ✅",
-            "endpoints": [
-                "/api/db-health",
-                "/api/carbon",
-                "/api/waste",
-                "/api/profit",
-                "/api/crop-recommend",
-            ],
             "waste_ai_proxy_enabled": bool(WASTE_AI_URL),
+            "weather_key_configured": bool(WEATHER_API_KEY),
         }
     )
 
-
-@app.route("/api/db-health", methods=["GET"])
+@app.get("/api/db-health")
 def db_health():
     conn = get_db_connection()
     if not conn:
@@ -424,8 +308,7 @@ def db_health():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
-
-@app.route("/api/carbon", methods=["POST"])
+@app.post("/api/carbon")
 def carbon_footprint():
     try:
         data = request.get_json() or {}
@@ -458,20 +341,19 @@ def carbon_footprint():
             }
         )
     except Exception as e:
-        logger.error(f"Carbon error: {str(e)}")
+        logger.error("Carbon error: %s\n%s", str(e), traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
-
-@app.route("/api/waste", methods=["POST"])
+@app.post("/api/waste")
 def waste_route():
     """
     Two modes:
     1) If WASTE_AI_URL is set: proxy image classification to Railway AI service (multipart/form-data 'image').
-    2) Else: just store manual waste data if JSON provided.
+    2) Else: store manual waste data if JSON provided.
     """
     if WASTE_AI_URL:
         if "image" not in request.files:
-            return jsonify({"error": "No image provided. Send multipart/form-data with key 'image'."}), 400
+            return jsonify({"error": "No image provided. Send multipart/form-data with key 'image'."}), 400  # [web:1290]
 
         f = request.files["image"]
         if not f or f.filename == "":
@@ -492,6 +374,7 @@ def waste_route():
             logger.error("Waste proxy error: %s\n%s", str(e), traceback.format_exc())
             return jsonify({"error": "Waste classification proxy failed", "detail": str(e)}), 502
 
+    # Manual mode
     try:
         data = request.get_json() or {}
         waste_type = data.get("waste_type")
@@ -503,11 +386,10 @@ def waste_route():
         save_waste_data(waste_type, waste_amount)
         return jsonify({"ok": True, "waste_type": waste_type, "waste_amount": waste_amount})
     except Exception as e:
-        logger.error(f"Waste error: {str(e)}")
+        logger.error("Waste error: %s\n%s", str(e), traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
-
-@app.route("/api/profit", methods=["POST"])
+@app.post("/api/profit")
 def profit_estimator():
     try:
         data = request.get_json() or {}
@@ -534,18 +416,16 @@ def profit_estimator():
             }
         )
     except Exception as e:
-        logger.error(f"Profit error: {str(e)}")
+        logger.error("Profit error: %s\n%s", str(e), traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
-
-@app.route("/api/crop-recommend", methods=["POST"])
+@app.post("/api/crop-recommend")
 def crop_recommend():
     """
-    Improved crop recommender:
-    - Current weather (OpenWeather) for UI [web:1022]
-    - Geocode city -> lat/lon (OpenWeather geo)
-    - NASA POWER daily -> last 30 days rainfall + avg temp [web:1052][web:1037]
-    - Score crops based on rules (extendable; later replace with ECOCROP) [web:1036]
+    Uses:
+    - OpenWeather current weather (units=metric). [web:1558]
+    - OpenWeather geocoding /geo/1.0/direct. [web:1563]
+    - NASA POWER daily point API (T2M, PRECTOT). [web:1567]
     """
     try:
         data = request.get_json() or {}
@@ -554,19 +434,19 @@ def crop_recommend():
         season = (data.get("season") or "").strip().lower()
 
         if not location or not soil or not season:
-            return jsonify({"error": "Missing required fields"}), 400
+            return jsonify({"error": "Missing required fields: location, soil, season"}), 400
 
         weather = fetch_weather(location)
-        if not weather:
-            return jsonify({"error": "Invalid location"}), 400
+        if weather.get("_error"):
+            return jsonify({"error": "Weather fetch failed", "detail": weather}), 502
 
         geo = geocode_city(location)
-        if not geo:
-            return jsonify({"error": "Failed to geocode location"}), 400
+        if geo.get("_error"):
+            return jsonify({"error": "Geocode failed", "detail": geo}), 502
 
         climate = fetch_nasa_power_last30(geo["lat"], geo["lon"])
-        if not climate:
-            return jsonify({"error": "Climate data fetch failed"}), 502
+        if climate.get("_error"):
+            return jsonify({"error": "Climate data fetch failed", "detail": climate}), 502
 
         avg_temp_30d = climate["avg_temp_30d"]
         rain_30d = climate["rain_30d"]
@@ -576,22 +456,19 @@ def crop_recommend():
             s = score_crop(rule, avg_temp_30d, rain_30d, soil, season)
             if s is not None:
                 scored.append((s, crop, rule["reason"]))
-
         scored.sort(key=lambda x: x[0], reverse=True)
 
         if not scored:
-            # fallback (still returns something)
             crops = ["Millets", "Pulses", "Groundnut"]
             explanation = [
                 "No exact match found for your soil/season with the current climate window.",
-                "Fallback to climate-resilient crops; add more crops/rules or import ECOCROP for broader coverage.",
+                "Fallback to climate-resilient crops; add more crops/rules for wider coverage.",
             ]
         else:
             top = scored[:6]
             crops = [c for _, c, _ in top]
             explanation = [f"{c}: {reason} (score={score})" for score, c, reason in top]
 
-        # Optional DB save
         save_crop_recommendation(
             location=location,
             soil=soil,
@@ -604,25 +481,40 @@ def crop_recommend():
 
         return jsonify(
             {
-                # OpenWeather UI values
+                "location": location,
+                "soil": soil,
+                "season": season,
+
                 "temperature": weather.get("temperature"),
                 "humidity": weather.get("humidity"),
                 "weather_icon": weather.get("icon"),
                 "weather_desc": weather.get("description"),
 
-                # Agro signal (more useful than 1h rain)
-                "rainfall": rain_30d,         # 30-day total rainfall (mm)
-                "avg_temp_30d": avg_temp_30d, # extra field (optional for frontend)
+                "rainfall": rain_30d,
+                "avg_temp_30d": avg_temp_30d,
 
                 "recommended_crops": crops,
                 "explanation": explanation,
             }
         )
-
     except Exception as e:
         logger.error("Crop error: %s\n%s", str(e), traceback.format_exc())
-        return jsonify({"error": "Crop recommendation failed"}), 500
+        return jsonify({"error": "Crop recommendation failed", "detail": str(e)}), 500
 
+# Debug helper: quickly test external APIs from browser/Postman
+@app.get("/api/weather-debug")
+def weather_debug():
+    city = (request.args.get("city") or "").strip()
+    if not city:
+        return jsonify({"error": "Pass ?city=CityName"}), 400
+    return jsonify(
+        {
+            "weather_key_configured": bool(WEATHER_API_KEY),
+            "city": city,
+            "weather": fetch_weather(city),
+            "geo": geocode_city(city),
+        }
+    )
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
