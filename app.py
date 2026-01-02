@@ -46,36 +46,32 @@ NASA_POWER_DAILY_POINT_URL = "https://power.larc.nasa.gov/api/temporal/daily/poi
 ECOCROP_DF = None
 ECOCROP_WARN = None
 
+
 def _normalize_cols(cols):
     # Remove spaces and uppercase for easier matching
     return [str(c).strip().replace(" ", "").upper() for c in cols]
 
+
 def load_ecocrop_df(path: str) -> pd.DataFrame:
     """
-    Loads the attached EcoCrop_DB.csv which is fixed-width formatted in this chat. [file:1822]
-    pandas.read_fwf reads fixed-width formatted lines into a DataFrame. [web:1823]
+    Loads EcoCrop_DB.csv (comma-separated CSV).
     """
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        raw = f.read()
+    # IMPORTANT: It's CSV, so use read_csv (not read_fwf)
+    # encoding_errors='ignore' helps if there are any weird bytes in the file.
+    df = pd.read_csv(path, encoding_errors="ignore")  # pandas.read_csv [web:2053]
 
-    # The file starts with a header + dashed line then data. [file:1822]
-    # Let pandas infer fixed-width columns from the data block.
-    df = pd.read_fwf(StringIO(raw), colspecs="infer", infer_nrows=300)
-
-    # Normalize column names so we can find required fields even if spacing differs.
+    # Normalize column names so we can find required fields even if casing differs.
     orig_cols = list(df.columns)
     df.columns = _normalize_cols(df.columns)
 
-    # Try to locate required ECOCROP fields (based on dataset tokens seen in file) [file:1822]
-    # Common tokens in your file: ECOPORTCODE, SCIENTIFICNAME, COMNAME, TOPMN, TOPMX, TMIN, TMAX, ROPMN, ROPMX, RMIN, RMAX [file:1822]
+    # Required ECOCROP fields
     required = ["COMNAME", "SCIENTIFICNAME", "TOPMN", "TOPMX", "TMIN", "TMAX", "ROPMN", "ROPMX", "RMIN", "RMAX"]
     missing = [c for c in required if c not in df.columns]
 
     if missing:
-        # If parsing produces weird col names, expose the first 40 so you can adjust quickly.
         raise ValueError(
             f"ECOCROP parse ok but missing columns: {missing}. "
-            f"Parsed columns sample: {df.columns.tolist()[:40]} (orig: {orig_cols[:10]})"
+            f"Parsed columns sample: {df.columns.tolist()[:40]} (orig: {orig_cols[:20]})"
         )
 
     df = df[required].copy()
@@ -91,6 +87,7 @@ def load_ecocrop_df(path: str) -> pd.DataFrame:
     df = df.dropna(subset=["COMNAME", "TOPMN", "TOPMX", "TMIN", "TMAX", "ROPMN", "ROPMX", "RMIN", "RMAX"])
 
     return df
+
 
 try:
     if os.path.exists(ECOCROP_PATH):
