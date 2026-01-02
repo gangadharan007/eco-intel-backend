@@ -34,6 +34,8 @@ CORS(
 WEATHER_API_KEY = os.environ.get("WEATHER_API_KEY", "").strip()
 WASTE_AI_URL = os.environ.get("WASTE_AI_URL", "").rstrip("/").strip()
 
+ECOCROP_PATH = os.environ.get("ECOCROP_PATH", "data/EcoCrop_DB.csv")
+
 OPENWEATHER_WEATHER_URL = "https://api.openweathermap.org/data/2.5/weather"
 OPENWEATHER_GEO_URL = "https://api.openweathermap.org/geo/1.0/direct"
 NASA_POWER_DAILY_POINT_URL = "https://power.larc.nasa.gov/api/temporal/daily/point"
