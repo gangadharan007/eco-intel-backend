@@ -277,10 +277,15 @@ def fetch_nasa_power_last30(lat: float, lon: float):
             "end": end.strftime("%Y%m%d"),
             "community": "AG",
             "format": "JSON",
-            # Use corrected precip + extra temp fields as fallback
-            "parameters": "T2M,T2M_MAX,T2M_MIN,PRECTOTCORR,PRECTOT",
             "time-standard": "UTC",
         }
+
+        wanted = ["T2M", "T2M_MAX", "T2M_MIN", "PRECTOTCORR", "PRECTOT"]
+        seen = set()
+        wanted = [p for p in wanted if not (p in seen or seen.add(p))]
+        params["parameters"] = ",".join(wanted)
+
+        logger.info("NASA POWER parameters=%s", params["parameters"])
 
         r = requests.get(NASA_POWER_DAILY_POINT_URL, params=params, timeout=25)
         if r.status_code != 200:
@@ -291,7 +296,6 @@ def fetch_nasa_power_last30(lat: float, lon: float):
         props = (j.get("properties") or {})
         param = (props.get("parameter") or {})
 
-        # Helper: parse a series dict safely and drop missing sentinels
         def _vals(series_dict):
             out = []
             for v in (series_dict or {}).values():
@@ -301,12 +305,11 @@ def fetch_nasa_power_last30(lat: float, lon: float):
                     fv = float(v)
                 except Exception:
                     continue
-                if fv in (-999, -999.0):
+                if fv <= -900:  # filters -999, -9999, etc.
                     continue
                 out.append(fv)
             return out
 
-        # Temp: prefer T2M, else avg of (T2M_MIN + T2M_MAX)/2 if available
         t2m_vals = _vals(param.get("T2M"))
         if not t2m_vals:
             tmin_vals = _vals(param.get("T2M_MIN"))
@@ -314,33 +317,21 @@ def fetch_nasa_power_last30(lat: float, lon: float):
             if tmin_vals and tmax_vals and len(tmin_vals) == len(tmax_vals):
                 t2m_vals = [(a + b) / 2.0 for a, b in zip(tmin_vals, tmax_vals)]
 
-        # Rain: prefer corrected, else raw
         rain_vals = _vals(param.get("PRECTOTCORR"))
         if not rain_vals:
             rain_vals = _vals(param.get("PRECTOT"))
 
         if not t2m_vals or not rain_vals:
-            return {
-                "_error": "NASA POWER missing data",
-                "detail": {
-                    "has_T2M": bool(param.get("T2M")),
-                    "has_T2M_MIN": bool(param.get("T2M_MIN")),
-                    "has_T2M_MAX": bool(param.get("T2M_MAX")),
-                    "has_PRECTOTCORR": bool(param.get("PRECTOTCORR")),
-                    "has_PRECTOT": bool(param.get("PRECTOT")),
-                    "t2m_points": len(t2m_vals),
-                    "rain_points": len(rain_vals),
-                },
-            }
+            return {"_error": "NASA POWER missing data"}
 
         avg_temp = sum(t2m_vals) / len(t2m_vals)
         total_rain = sum(rain_vals)
-
         return {"avg_temp_30d": round(avg_temp, 2), "rain_30d": round(total_rain, 2)}
 
     except Exception as e:
         logger.error("fetch_nasa_power_last30 error: %s\n%s", str(e), traceback.format_exc())
         return {"_error": "fetch_nasa_power_last30 exception", "detail": str(e)}
+
 
 
 # ---------------- ECOCROP Scoring ----------------
