@@ -40,8 +40,6 @@ OPENWEATHER_WEATHER_URL = "https://api.openweathermap.org/data/2.5/weather"
 OPENWEATHER_GEO_URL = "https://api.openweathermap.org/geo/1.0/direct"
 NASA_POWER_DAILY_POINT_URL = "https://power.larc.nasa.gov/api/temporal/daily/point"
 
-# ECOCROP (your attached "csv" is actually fixed-width text) [file:1822]
-ECOCROP_PATH = os.environ.get("ECOCROP_PATH", "EcoCrop_DB.csv")
 
 
 # ---------------- ECOCROP Load (startup) ----------------
