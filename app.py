@@ -3,6 +3,7 @@ import logging
 import traceback
 from urllib.parse import urlparse
 from datetime import date, timedelta
+from io import StringIO
 
 import requests
 import mysql.connector
@@ -10,9 +11,13 @@ from mysql.connector import Error
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
+import pandas as pd  # required for ECOCROP fixed-width parsing [web:1823]
+
+
 # ---------------- Logging ----------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
 
 # ---------------- App ----------------
 app = Flask(__name__)
@@ -24,6 +29,7 @@ CORS(
     supports_credentials=False,
 )
 
+
 # ---------------- Config ----------------
 WEATHER_API_KEY = os.environ.get("WEATHER_API_KEY", "").strip()
 WASTE_AI_URL = os.environ.get("WASTE_AI_URL", "").rstrip("/").strip()
@@ -31,6 +37,73 @@ WASTE_AI_URL = os.environ.get("WASTE_AI_URL", "").rstrip("/").strip()
 OPENWEATHER_WEATHER_URL = "https://api.openweathermap.org/data/2.5/weather"
 OPENWEATHER_GEO_URL = "https://api.openweathermap.org/geo/1.0/direct"
 NASA_POWER_DAILY_POINT_URL = "https://power.larc.nasa.gov/api/temporal/daily/point"
+
+# ECOCROP (your attached "csv" is actually fixed-width text) [file:1822]
+ECOCROP_PATH = os.environ.get("ECOCROP_PATH", "EcoCrop_DB.csv")
+
+
+# ---------------- ECOCROP Load (startup) ----------------
+ECOCROP_DF = None
+ECOCROP_WARN = None
+
+def _normalize_cols(cols):
+    # Remove spaces and uppercase for easier matching
+    return [str(c).strip().replace(" ", "").upper() for c in cols]
+
+def load_ecocrop_df(path: str) -> pd.DataFrame:
+    """
+    Loads the attached EcoCrop_DB.csv which is fixed-width formatted in this chat. [file:1822]
+    pandas.read_fwf reads fixed-width formatted lines into a DataFrame. [web:1823]
+    """
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        raw = f.read()
+
+    # The file starts with a header + dashed line then data. [file:1822]
+    # Let pandas infer fixed-width columns from the data block.
+    df = pd.read_fwf(StringIO(raw), colspecs="infer", infer_nrows=300)
+
+    # Normalize column names so we can find required fields even if spacing differs.
+    orig_cols = list(df.columns)
+    df.columns = _normalize_cols(df.columns)
+
+    # Try to locate required ECOCROP fields (based on dataset tokens seen in file) [file:1822]
+    # Common tokens in your file: ECOPORTCODE, SCIENTIFICNAME, COMNAME, TOPMN, TOPMX, TMIN, TMAX, ROPMN, ROPMX, RMIN, RMAX [file:1822]
+    required = ["COMNAME", "SCIENTIFICNAME", "TOPMN", "TOPMX", "TMIN", "TMAX", "ROPMN", "ROPMX", "RMIN", "RMAX"]
+    missing = [c for c in required if c not in df.columns]
+
+    if missing:
+        # If parsing produces weird col names, expose the first 40 so you can adjust quickly.
+        raise ValueError(
+            f"ECOCROP parse ok but missing columns: {missing}. "
+            f"Parsed columns sample: {df.columns.tolist()[:40]} (orig: {orig_cols[:10]})"
+        )
+
+    df = df[required].copy()
+
+    # Coerce numeric columns
+    for c in ["TOPMN", "TOPMX", "TMIN", "TMAX", "ROPMN", "ROPMX", "RMIN", "RMAX"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    df["COMNAME"] = df["COMNAME"].astype(str).str.strip()
+    df["SCIENTIFICNAME"] = df["SCIENTIFICNAME"].astype(str).str.strip()
+
+    # Drop invalid rows
+    df = df.dropna(subset=["COMNAME", "TOPMN", "TOPMX", "TMIN", "TMAX", "ROPMN", "ROPMX", "RMIN", "RMAX"])
+
+    return df
+
+try:
+    if os.path.exists(ECOCROP_PATH):
+        ECOCROP_DF = load_ecocrop_df(ECOCROP_PATH)
+        logger.info("✅ ECOCROP loaded: %s rows from %s", len(ECOCROP_DF), ECOCROP_PATH)
+    else:
+        ECOCROP_WARN = f"ECOCROP file not found at {ECOCROP_PATH}"
+        logger.error("❌ %s", ECOCROP_WARN)
+except Exception as e:
+    ECOCROP_WARN = f"ECOCROP load failed: {str(e)}"
+    logger.error("❌ %s\n%s", ECOCROP_WARN, traceback.format_exc())
+    ECOCROP_DF = None
+
 
 # ---------------- DB Connection ----------------
 def _conn_from_mysql_url(mysql_url: str):
@@ -68,6 +141,7 @@ def get_db_connection():
     except Exception as e:
         logger.error(f"DB Parse/Error: {e}")
         return None
+
 
 # ---------------- DB Save Helpers ----------------
 def save_carbon_footprint(carbon_value: float):
@@ -132,6 +206,7 @@ def save_crop_recommendation(location: str, soil: str, season: str, avg_temp_30d
     except Exception:
         pass
 
+
 # ---------------- Weather + Geo Helpers ----------------
 def fetch_weather(city: str):
     if not WEATHER_API_KEY:
@@ -141,7 +216,6 @@ def fetch_weather(city: str):
         params = {"q": city, "appid": WEATHER_API_KEY, "units": "metric"}
         r = requests.get(OPENWEATHER_WEATHER_URL, params=params, timeout=12)
         if r.status_code != 200:
-            print("OpenWeather weather failed", r.status_code, r.text[:300])  # shows in Vercel logs [web:1726]
             logger.error("OpenWeather /weather failed (%s): %s", r.status_code, r.text[:200])
             return {"_error": "OpenWeather weather failed", "status": r.status_code, "raw": r.text[:300]}
 
@@ -159,7 +233,6 @@ def fetch_weather(city: str):
             "rain_1h_or_3h": rain_mm,
         }
     except Exception as e:
-        print("fetch_weather exception", str(e))
         logger.error("fetch_weather error: %s\n%s", str(e), traceback.format_exc())
         return {"_error": "fetch_weather exception", "detail": str(e)}
 
@@ -171,7 +244,6 @@ def geocode_city(city: str):
         params = {"q": city, "limit": 1, "appid": WEATHER_API_KEY}
         r = requests.get(OPENWEATHER_GEO_URL, params=params, timeout=12)
         if r.status_code != 200:
-            print("OpenWeather geocode failed", r.status_code, r.text[:300])
             logger.error("OpenWeather geocode failed (%s): %s", r.status_code, r.text[:200])
             return {"_error": "OpenWeather geocode failed", "status": r.status_code, "raw": r.text[:300]}
 
@@ -187,12 +259,15 @@ def geocode_city(city: str):
             "state": arr[0].get("state"),
         }
     except Exception as e:
-        print("geocode_city exception", str(e))
         logger.error("geocode_city error: %s\n%s", str(e), traceback.format_exc())
         return {"_error": "geocode_city exception", "detail": str(e)}
 
+
 # ---------------- NASA POWER Climate Helper ----------------
 def fetch_nasa_power_last30(lat: float, lon: float):
+    """
+    NASA POWER Daily API returns time-series analysis-ready daily data; repeated requests for the same location can get blocked, so keep your fallback/caching in mind. [web:1567]
+    """
     try:
         end = date.today()
         start = end - timedelta(days=30)
@@ -205,12 +280,11 @@ def fetch_nasa_power_last30(lat: float, lon: float):
             "community": "AG",
             "format": "JSON",
             "parameters": "T2M,PRECTOT",
+            "time-standard": "UTC",
         }
 
         r = requests.get(NASA_POWER_DAILY_POINT_URL, params=params, timeout=25)
         if r.status_code != 200:
-            # Print to ensure it appears in Vercel logs [web:1726]
-            print("NASA POWER failed", r.status_code, r.text[:300])
             logger.error("NASA POWER failed (%s): %s", r.status_code, r.text[:200])
             return {"_error": "NASA POWER failed", "status": r.status_code, "raw": r.text[:300]}
 
@@ -231,47 +305,65 @@ def fetch_nasa_power_last30(lat: float, lon: float):
 
         return {"avg_temp_30d": round(avg_temp, 2), "rain_30d": round(total_rain, 2)}
     except Exception as e:
-        print("NASA POWER exception", str(e))
         logger.error("fetch_nasa_power_last30 error: %s\n%s", str(e), traceback.format_exc())
         return {"_error": "fetch_nasa_power_last30 exception", "detail": str(e)}
 
-# ---------------- Crop Rules ----------------
-CROP_RULES = {
-    "Rice": {"seasons": {"kharif"}, "soils": {"clay", "loamy"}, "t": (20, 35), "r30": (120, 500), "reason": "Warm + higher water availability suits rice."},
-    "Maize": {"seasons": {"kharif", "rabi"}, "soils": {"loamy", "sandy"}, "t": (18, 34), "r30": (50, 250), "reason": "Warm weather with moderate rainfall suits maize."},
-    "Cotton": {"seasons": {"kharif"}, "soils": {"loamy", "clay", "sandy"}, "t": (20, 35), "r30": (30, 200), "reason": "Warm temperatures and moderate moisture suit cotton."},
-    "Wheat": {"seasons": {"rabi"}, "soils": {"loamy"}, "t": (10, 25), "r30": (10, 120), "reason": "Cooler season + low/moderate rainfall suits wheat."},
-    "Barley": {"seasons": {"rabi"}, "soils": {"loamy", "sandy"}, "t": (7, 25), "r30": (10, 100), "reason": "Cooler conditions + lower rainfall suits barley."},
-    "Mustard": {"seasons": {"rabi"}, "soils": {"loamy", "sandy"}, "t": (10, 25), "r30": (5, 80), "reason": "Cool + relatively dry conditions suit mustard."},
-    "Groundnut": {"seasons": {"kharif", "summer"}, "soils": {"sandy", "loamy"}, "t": (20, 33), "r30": (20, 150), "reason": "Warm + well-drained soils suit groundnut."},
-    "Sugarcane": {"seasons": {"kharif", "summer"}, "soils": {"clay", "loamy"}, "t": (20, 35), "r30": (80, 400), "reason": "Warm + higher water availability suits sugarcane."},
-    "Millets": {"seasons": {"kharif", "summer"}, "soils": {"sandy", "loamy"}, "t": (20, 38), "r30": (5, 120), "reason": "Heat + low rainfall resilience suits millets."},
-    "Pulses": {"seasons": {"kharif", "rabi"}, "soils": {"loamy", "sandy"}, "t": (15, 32), "r30": (5, 120), "reason": "Many pulses fit moderate temps + low/mod rainfall."},
-}
 
-def score_crop(rule, t, r30, soil, season):
-    if season not in rule["seasons"]:
-        return None
-    if soil not in rule["soils"]:
-        return None
+# ---------------- ECOCROP Scoring ----------------
+def _tri_score(x, xmin, xopt_min, xopt_max, xmax):
+    if x is None:
+        return 0.0
+    if x <= xmin or x >= xmax:
+        return 0.0
+    if xopt_min <= x <= xopt_max:
+        return 100.0
+    if xmin < x < xopt_min:
+        denom = (xopt_min - xmin)
+        return 100.0 * (x - xmin) / denom if denom else 0.0
+    denom = (xmax - xopt_max)
+    return 100.0 * (xmax - x) / denom if denom else 0.0
 
-    tmin, tmax = rule["t"]
-    rmin, rmax = rule["r30"]
+def recommend_ecocrop(avg_temp_30d, rain_30d, top_n=6):
+    """
+    EcoCrop-style: compute temp suitability + precipitation suitability from each crop's min/opt/max bands,
+    then overall suitability is limited by the weaker factor (min). [web:1768]
+    """
+    if ECOCROP_DF is None:
+        return [], {"_error": "ECOCROP not loaded", "detail": ECOCROP_WARN}
 
-    if t is None or r30 is None:
-        return None
-    if not (tmin <= t <= tmax):
-        return None
-    if not (rmin <= r30 <= rmax):
-        return None
+    results = []
+    df = ECOCROP_DF
 
-    tmid = (tmin + tmax) / 2.0
-    rmid = (rmin + rmax) / 2.0
+    for _, row in df.iterrows():
+        temp = _tri_score(avg_temp_30d, row["TMIN"], row["TOPMN"], row["TOPMX"], row["TMAX"])
+        rain = _tri_score(rain_30d, row["RMIN"], row["ROPMN"], row["ROPMX"], row["RMAX"])
+        final = min(temp, rain)  # limiting factor [web:1768]
 
-    score = 100.0
-    score -= abs(t - tmid) * 3.0
-    score -= abs(r30 - rmid) * 0.3
-    return round(score, 2)
+        if final > 0:
+            results.append({
+                "crop": row["COMNAME"],
+                "scientific": row["SCIENTIFICNAME"],
+                "finalScore": round(final, 1),
+                "tempScore": round(temp, 1),
+                "rainScore": round(rain, 1),
+            })
+
+    results.sort(key=lambda x: x["finalScore"], reverse=True)
+
+    # Deduplicate by crop common name (EcoCrop has variants/synonyms)
+    seen = set()
+    uniq = []
+    for r in results:
+        key = r["crop"].lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(r)
+        if len(uniq) >= top_n:
+            break
+
+    return uniq, None
+
 
 # ---------------- Routes ----------------
 @app.get("/")
@@ -281,6 +373,8 @@ def root():
             "status": "Eco Intel AI Backend LIVE!",
             "waste_ai_proxy_enabled": bool(WASTE_AI_URL),
             "weather_key_configured": bool(WEATHER_API_KEY),
+            "ecocrop_loaded": bool(ECOCROP_DF is not None),
+            "ecocrop_warning": ECOCROP_WARN,
         }
     )
 
@@ -424,35 +518,35 @@ def crop_recommend():
 
         climate = fetch_nasa_power_last30(geo["lat"], geo["lon"])
 
-        # ✅ Fallback (do NOT fail hard if NASA POWER is throttling/down) [web:1567]
+        # NASA POWER can fail; docs warn repeated requests for same cell can be blocked. [web:1567]
         if climate.get("_error"):
             avg_temp_30d = weather.get("temperature")
-            rain_30d = 0
+            rain_30d = float(weather.get("rain_1h_or_3h") or 0)  # better than always 0
             climate_source = "fallback_openweather"
-            climate_detail = climate
+            climate_warning = climate
         else:
             avg_temp_30d = climate["avg_temp_30d"]
             rain_30d = climate["rain_30d"]
             climate_source = "nasa_power"
-            climate_detail = None
+            climate_warning = None
 
-        scored = []
-        for crop, rule in CROP_RULES.items():
-            s = score_crop(rule, avg_temp_30d, rain_30d, soil, season)
-            if s is not None:
-                scored.append((s, crop, rule["reason"]))
-        scored.sort(key=lambda x: x[0], reverse=True)
+        # ECOCROP recommendation (ignores soil/season, focuses on climate suitability)
+        top, err = recommend_ecocrop(avg_temp_30d, rain_30d, top_n=6)
 
-        if not scored:
+        if err or not top:
             crops = ["Millets", "Pulses", "Groundnut"]
             explanation = [
-                "No exact match found for your soil/season with the current climate window.",
-                "Fallback to climate-resilient crops; add more crops/rules for wider coverage.",
+                "ECOCROP produced no matches or is not loaded.",
+                "Fallback to resilient crops.",
             ]
+            if err:
+                explanation.append(f"Detail: {err}")
         else:
-            top = scored[:6]
-            crops = [c for _, c, _ in top]
-            explanation = [f"{c}: {reason} (score={score})" for score, c, reason in top]
+            crops = [x["crop"] for x in top]
+            explanation = [
+                f'{x["crop"]}: final={x["finalScore"]}, temp={x["tempScore"]}, rain={x["rainScore"]}'
+                for x in top
+            ]
 
         save_crop_recommendation(
             location=location,
@@ -469,6 +563,9 @@ def crop_recommend():
             "soil": soil,
             "season": season,
 
+            "lat": geo["lat"],
+            "lon": geo["lon"],
+
             "temperature": weather.get("temperature"),
             "humidity": weather.get("humidity"),
             "weather_icon": weather.get("icon"),
@@ -478,18 +575,21 @@ def crop_recommend():
             "avg_temp_30d": avg_temp_30d,
 
             "climate_source": climate_source,
+            "climate_warning": climate_warning,
+            "ecocrop_loaded": bool(ECOCROP_DF is not None),
+            "ecocrop_warning": ECOCROP_WARN,
+
             "recommended_crops": crops,
+            "ecocrop_top": top,  # include scores so frontend shows “why”
             "explanation": explanation,
         }
-
-        if climate_detail:
-            resp["climate_warning"] = climate_detail
 
         return jsonify(resp)
 
     except Exception as e:
         logger.error("Crop error: %s\n%s", str(e), traceback.format_exc())
         return jsonify({"error": "Crop recommendation failed", "detail": str(e)}), 500
+
 
 # Debug helper: test OpenWeather quickly
 @app.get("/api/weather-debug")
@@ -506,7 +606,7 @@ def weather_debug():
         }
     )
 
-# ✅ NEW: Debug helper for NASA POWER
+# Debug helper for NASA POWER
 @app.get("/api/climate-debug")
 def climate_debug():
     lat = request.args.get("lat")
@@ -516,6 +616,20 @@ def climate_debug():
 
     out = fetch_nasa_power_last30(float(lat), float(lon))
     return jsonify(out), (502 if out.get("_error") else 200)
+
+# Debug helper for ECOCROP loading
+@app.get("/api/ecocrop-debug")
+def ecocrop_debug():
+    if ECOCROP_DF is None:
+        return jsonify({"ok": False, "warning": ECOCROP_WARN}), 500
+
+    return jsonify({
+        "ok": True,
+        "rows": int(len(ECOCROP_DF)),
+        "cols": list(ECOCROP_DF.columns),
+        "sample": ECOCROP_DF.head(3).to_dict(orient="records"),
+    })
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
