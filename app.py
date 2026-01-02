@@ -28,15 +28,12 @@ CORS(
 WEATHER_API_KEY = os.environ.get("WEATHER_API_KEY", "").strip()
 WASTE_AI_URL = os.environ.get("WASTE_AI_URL", "").rstrip("/").strip()
 
-OPENWEATHER_WEATHER_URL = "https://api.openweathermap.org/data/2.5/weather"  # [web:1558]
-OPENWEATHER_GEO_URL = "https://api.openweathermap.org/geo/1.0/direct"        # [web:1563]
-NASA_POWER_DAILY_POINT_URL = "https://power.larc.nasa.gov/api/temporal/daily/point"  # [web:1567]
+OPENWEATHER_WEATHER_URL = "https://api.openweathermap.org/data/2.5/weather"
+OPENWEATHER_GEO_URL = "https://api.openweathermap.org/geo/1.0/direct"
+NASA_POWER_DAILY_POINT_URL = "https://power.larc.nasa.gov/api/temporal/daily/point"
 
 # ---------------- DB Connection ----------------
 def _conn_from_mysql_url(mysql_url: str):
-    """
-    Parse mysql://user:pass@host:port/db into mysql.connector.connect args.
-    """
     u = urlparse(mysql_url)
     db_name = (u.path or "").lstrip("/")
     if not (u.hostname and u.username and db_name):
@@ -52,7 +49,6 @@ def _conn_from_mysql_url(mysql_url: str):
     )
 
 def get_db_connection():
-    """Direct MySQL connection for Vercel (Railway DB)."""
     try:
         mysql_url = os.environ.get("MYSQL_URL")
         if mysql_url:
@@ -134,28 +130,24 @@ def save_crop_recommendation(location: str, soil: str, season: str, avg_temp_30d
         conn.close()
         logger.info("✅ Saved crop recommendation to DB")
     except Exception:
-        # ignore if table doesn't exist
         pass
 
 # ---------------- Weather + Geo Helpers ----------------
 def fetch_weather(city: str):
-    """
-    OpenWeather current weather endpoint. Use units=metric for Celsius. [web:1558]
-    """
     if not WEATHER_API_KEY:
         return {"_error": "WEATHER_API_KEY not set on backend"}
 
     try:
-        params = {"q": city, "appid": WEATHER_API_KEY, "units": "metric"}  # units supported by API [web:1558]
+        params = {"q": city, "appid": WEATHER_API_KEY, "units": "metric"}
         r = requests.get(OPENWEATHER_WEATHER_URL, params=params, timeout=12)
         if r.status_code != 200:
+            print("OpenWeather weather failed", r.status_code, r.text[:300])  # shows in Vercel logs [web:1726]
             logger.error("OpenWeather /weather failed (%s): %s", r.status_code, r.text[:200])
-            return {"_error": "OpenWeather weather failed", "status": r.status_code}
+            return {"_error": "OpenWeather weather failed", "status": r.status_code, "raw": r.text[:300]}
 
         data = r.json()
         main = data.get("main", {}) or {}
         weather_list = data.get("weather", [{}]) or [{}]
-
         rain = data.get("rain", {}) or {}
         rain_mm = rain.get("1h") or rain.get("3h") or 0
 
@@ -167,22 +159,21 @@ def fetch_weather(city: str):
             "rain_1h_or_3h": rain_mm,
         }
     except Exception as e:
+        print("fetch_weather exception", str(e))
         logger.error("fetch_weather error: %s\n%s", str(e), traceback.format_exc())
         return {"_error": "fetch_weather exception", "detail": str(e)}
 
 def geocode_city(city: str):
-    """
-    OpenWeather geocoding: /geo/1.0/direct?q=...&limit=1&appid=... [web:1563]
-    """
     if not WEATHER_API_KEY:
         return {"_error": "WEATHER_API_KEY not set on backend"}
 
     try:
-        params = {"q": city, "limit": 1, "appid": WEATHER_API_KEY}  # [web:1563]
+        params = {"q": city, "limit": 1, "appid": WEATHER_API_KEY}
         r = requests.get(OPENWEATHER_GEO_URL, params=params, timeout=12)
         if r.status_code != 200:
+            print("OpenWeather geocode failed", r.status_code, r.text[:300])
             logger.error("OpenWeather geocode failed (%s): %s", r.status_code, r.text[:200])
-            return {"_error": "OpenWeather geocode failed", "status": r.status_code}
+            return {"_error": "OpenWeather geocode failed", "status": r.status_code, "raw": r.text[:300]}
 
         arr = r.json()
         if not arr:
@@ -196,15 +187,12 @@ def geocode_city(city: str):
             "state": arr[0].get("state"),
         }
     except Exception as e:
+        print("geocode_city exception", str(e))
         logger.error("geocode_city error: %s\n%s", str(e), traceback.format_exc())
         return {"_error": "geocode_city exception", "detail": str(e)}
 
 # ---------------- NASA POWER Climate Helper ----------------
 def fetch_nasa_power_last30(lat: float, lon: float):
-    """
-    NASA POWER Daily API: temporal/daily/point
-    parameters: T2M,PRECTOT and community=AG and format=JSON. [web:1567]
-    """
     try:
         end = date.today()
         start = end - timedelta(days=30)
@@ -221,8 +209,10 @@ def fetch_nasa_power_last30(lat: float, lon: float):
 
         r = requests.get(NASA_POWER_DAILY_POINT_URL, params=params, timeout=25)
         if r.status_code != 200:
+            # Print to ensure it appears in Vercel logs [web:1726]
+            print("NASA POWER failed", r.status_code, r.text[:300])
             logger.error("NASA POWER failed (%s): %s", r.status_code, r.text[:200])
-            return {"_error": "NASA POWER failed", "status": r.status_code}
+            return {"_error": "NASA POWER failed", "status": r.status_code, "raw": r.text[:300]}
 
         j = r.json()
         props = (j.get("properties") or {})
@@ -241,6 +231,7 @@ def fetch_nasa_power_last30(lat: float, lon: float):
 
         return {"avg_temp_30d": round(avg_temp, 2), "rain_30d": round(total_rain, 2)}
     except Exception as e:
+        print("NASA POWER exception", str(e))
         logger.error("fetch_nasa_power_last30 error: %s\n%s", str(e), traceback.format_exc())
         return {"_error": "fetch_nasa_power_last30 exception", "detail": str(e)}
 
@@ -346,14 +337,9 @@ def carbon_footprint():
 
 @app.post("/api/waste")
 def waste_route():
-    """
-    Two modes:
-    1) If WASTE_AI_URL is set: proxy image classification to Railway AI service (multipart/form-data 'image').
-    2) Else: store manual waste data if JSON provided.
-    """
     if WASTE_AI_URL:
         if "image" not in request.files:
-            return jsonify({"error": "No image provided. Send multipart/form-data with key 'image'."}), 400  # [web:1290]
+            return jsonify({"error": "No image provided. Send multipart/form-data with key 'image'."}), 400
 
         f = request.files["image"]
         if not f or f.filename == "":
@@ -369,12 +355,10 @@ def waste_route():
                 payload = {"error": "AI service returned non-JSON response", "raw": r.text}
 
             return jsonify(payload), r.status_code
-
         except Exception as e:
             logger.error("Waste proxy error: %s\n%s", str(e), traceback.format_exc())
             return jsonify({"error": "Waste classification proxy failed", "detail": str(e)}), 502
 
-    # Manual mode
     try:
         data = request.get_json() or {}
         waste_type = data.get("waste_type")
@@ -421,12 +405,6 @@ def profit_estimator():
 
 @app.post("/api/crop-recommend")
 def crop_recommend():
-    """
-    Uses:
-    - OpenWeather current weather (units=metric). [web:1558]
-    - OpenWeather geocoding /geo/1.0/direct. [web:1563]
-    - NASA POWER daily point API (T2M, PRECTOT). [web:1567]
-    """
     try:
         data = request.get_json() or {}
         location = (data.get("location") or "").strip()
@@ -445,11 +423,18 @@ def crop_recommend():
             return jsonify({"error": "Geocode failed", "detail": geo}), 502
 
         climate = fetch_nasa_power_last30(geo["lat"], geo["lon"])
-        if climate.get("_error"):
-            return jsonify({"error": "Climate data fetch failed", "detail": climate}), 502
 
-        avg_temp_30d = climate["avg_temp_30d"]
-        rain_30d = climate["rain_30d"]
+        # ✅ Fallback (do NOT fail hard if NASA POWER is throttling/down) [web:1567]
+        if climate.get("_error"):
+            avg_temp_30d = weather.get("temperature")
+            rain_30d = 0
+            climate_source = "fallback_openweather"
+            climate_detail = climate
+        else:
+            avg_temp_30d = climate["avg_temp_30d"]
+            rain_30d = climate["rain_30d"]
+            climate_source = "nasa_power"
+            climate_detail = None
 
         scored = []
         for crop, rule in CROP_RULES.items():
@@ -473,35 +458,40 @@ def crop_recommend():
             location=location,
             soil=soil,
             season=season,
-            avg_temp_30d=avg_temp_30d,
-            rain_30d=rain_30d,
+            avg_temp_30d=float(avg_temp_30d) if avg_temp_30d is not None else 0.0,
+            rain_30d=float(rain_30d) if rain_30d is not None else 0.0,
             humidity=int(weather.get("humidity") or 0),
             crops=crops,
         )
 
-        return jsonify(
-            {
-                "location": location,
-                "soil": soil,
-                "season": season,
+        resp = {
+            "location": location,
+            "soil": soil,
+            "season": season,
 
-                "temperature": weather.get("temperature"),
-                "humidity": weather.get("humidity"),
-                "weather_icon": weather.get("icon"),
-                "weather_desc": weather.get("description"),
+            "temperature": weather.get("temperature"),
+            "humidity": weather.get("humidity"),
+            "weather_icon": weather.get("icon"),
+            "weather_desc": weather.get("description"),
 
-                "rainfall": rain_30d,
-                "avg_temp_30d": avg_temp_30d,
+            "rainfall": rain_30d,
+            "avg_temp_30d": avg_temp_30d,
 
-                "recommended_crops": crops,
-                "explanation": explanation,
-            }
-        )
+            "climate_source": climate_source,
+            "recommended_crops": crops,
+            "explanation": explanation,
+        }
+
+        if climate_detail:
+            resp["climate_warning"] = climate_detail
+
+        return jsonify(resp)
+
     except Exception as e:
         logger.error("Crop error: %s\n%s", str(e), traceback.format_exc())
         return jsonify({"error": "Crop recommendation failed", "detail": str(e)}), 500
 
-# Debug helper: quickly test external APIs from browser/Postman
+# Debug helper: test OpenWeather quickly
 @app.get("/api/weather-debug")
 def weather_debug():
     city = (request.args.get("city") or "").strip()
@@ -515,6 +505,17 @@ def weather_debug():
             "geo": geocode_city(city),
         }
     )
+
+# ✅ NEW: Debug helper for NASA POWER
+@app.get("/api/climate-debug")
+def climate_debug():
+    lat = request.args.get("lat")
+    lon = request.args.get("lon")
+    if not lat or not lon:
+        return jsonify({"error": "Pass ?lat=...&lon=..."}), 400
+
+    out = fetch_nasa_power_last30(float(lat), float(lon))
+    return jsonify(out), (502 if out.get("_error") else 200)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
