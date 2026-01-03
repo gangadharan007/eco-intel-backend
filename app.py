@@ -258,6 +258,24 @@ def geocode_city(city: str):
     except Exception as e:
         logger.error("geocode_city error: %s\n%s", str(e), traceback.format_exc())
         return {"_error": "geocode_city exception", "detail": str(e)}
+def normalize_season(season: str) -> str:
+    s = (season or "").strip().lower()
+    # Treat monsoon as kharif (India monsoon crop season overlaps with kharif). [web:2251]
+    if s == "monsoon":
+        return "kharif"
+    return s
+
+SOIL_BONUS = {
+    "loamy": {"wheat": 1.10, "maize": 1.05, "millet": 1.10, "groundnut": 1.10, "cotton": 1.05, "rice": 1.00},
+    "sandy": {"groundnut": 1.20, "millet": 1.15, "cotton": 1.05},
+    "clayey": {"rice": 1.20, "sugarcane": 1.15},
+}
+
+SEASON_BONUS = {
+    "kharif": {"rice": 1.20, "maize": 1.10, "cotton": 1.10, "millet": 1.05, "groundnut": 1.05},
+    "rabi": {"wheat": 1.25, "mustard": 1.15, "gram": 1.15},
+    "summer": {"groundnut": 1.10, "millet": 1.10},
+}
 
 
 # ---------------- NASA POWER Climate Helper ----------------
@@ -348,34 +366,53 @@ def _tri_score(x, xmin, xopt_min, xopt_max, xmax):
     denom = (xmax - xopt_max)
     return 100.0 * (xmax - x) / denom if denom else 0.0
 
-def recommend_ecocrop(avg_temp_30d, rain_30d, top_n=6):
-    """
-    EcoCrop-style: compute temp suitability + precipitation suitability from each crop's min/opt/max bands,
-    then overall suitability is limited by the weaker factor (min). [web:1768]
-    """
+def recommend_ecocrop(avg_temp_30d, rain_30d, soil=None, season=None, top_n=6):
     if ECOCROP_DF is None:
         return [], {"_error": "ECOCROP not loaded", "detail": ECOCROP_WARN}
 
+    soil = (soil or "").strip().lower()
+    season = normalize_season(season)
+
+    # If rainfall is unknown/0 (common fallback), do temperature-only scoring.
+    rain_unknown = (rain_30d is None) or (float(rain_30d) == 0.0)
+
     results = []
-    df = ECOCROP_DF
-
-    for _, row in df.iterrows():
+    for _, row in ECOCROP_DF.iterrows():
         temp = _tri_score(avg_temp_30d, row["TMIN"], row["TOPMN"], row["TOPMX"], row["TMAX"])
-        rain = _tri_score(rain_30d, row["RMIN"], row["ROPMN"], row["ROPMX"], row["RMAX"])
-        final = min(temp, rain)  # limiting factor [web:1768]
 
-        if final > 0:
-            results.append({
-                "crop": row["COMNAME"],
-                "scientific": row["SCIENTIFICNAME"],
-                "finalScore": round(final, 1),
-                "tempScore": round(temp, 1),
-                "rainScore": round(rain, 1),
-            })
+        if rain_unknown:
+            rain_score = None
+            final = temp
+        else:
+            rain_score = _tri_score(rain_30d, row["RMIN"], row["ROPMN"], row["ROPMX"], row["RMAX"])
+            final = min(temp, rain_score)
+
+        if final <= 0:
+            continue
+
+        crop_name = str(row["COMNAME"]).split(",")[0].strip()
+        cname = crop_name.lower()
+
+        boost = 1.0
+        for key, mult in (SOIL_BONUS.get(soil, {}) or {}).items():
+            if key in cname:
+                boost *= mult
+        for key, mult in (SEASON_BONUS.get(season, {}) or {}).items():
+            if key in cname:
+                boost *= mult
+
+        final2 = final * boost
+
+        results.append({
+            "crop": crop_name,
+            "scientific": row["SCIENTIFICNAME"],
+            "finalScore": round(final2, 1),
+            "tempScore": round(temp, 1),
+            "rainScore": None if rain_score is None else round(rain_score, 1),
+        })
 
     results.sort(key=lambda x: x["finalScore"], reverse=True)
 
-    # Deduplicate by crop common name (EcoCrop has variants/synonyms)
     seen = set()
     uniq = []
     for r in results:
@@ -388,6 +425,7 @@ def recommend_ecocrop(avg_temp_30d, rain_30d, top_n=6):
             break
 
     return uniq, None
+
 
 
 # ---------------- Routes ----------------
@@ -528,7 +566,7 @@ def crop_recommend():
         data = request.get_json() or {}
         location = (data.get("location") or "").strip()
         soil = (data.get("soil") or "").strip().lower()
-        season = (data.get("season") or "").strip().lower()
+        season = normalize_season((data.get("season") or ""))
 
         if not location or not soil or not season:
             return jsonify({"error": "Missing required fields: location, soil, season"}), 400
@@ -556,7 +594,8 @@ def crop_recommend():
             climate_warning = None
 
         # ECOCROP recommendation (ignores soil/season, focuses on climate suitability)
-        top, err = recommend_ecocrop(avg_temp_30d, rain_30d, top_n=6)
+        top, err = recommend_ecocrop(avg_temp_30d, rain_30d, soil=soil, season=season, top_n=6)
+
 
         if err or not top:
             crops = ["Millets", "Pulses", "Groundnut"]
