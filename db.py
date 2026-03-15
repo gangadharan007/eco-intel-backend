@@ -31,7 +31,7 @@ def _connect_from_url(mysql_url: str):
 
 def get_connection():
     """
-    Connect to Railway MySQL.
+    Connect to MySQL/TiDB.
 
     Supports:
     - MYSQL_URL=mysql://user:pass@host:port/db
@@ -49,7 +49,7 @@ def get_connection():
             port=int(os.environ.get("MYSQL_PORT", 3306)),
             user=os.environ.get("MYSQL_USER", "root"),
             password=os.environ.get("MYSQL_PASSWORD"),
-            database=os.environ.get("MYSQL_DATABASE", "railway"),
+            database=os.environ.get("MYSQL_DATABASE", "eco_intel_ai"),
             autocommit=True,
         )
         logger.info("✅ DB Connected (MYSQL_HOST vars)")

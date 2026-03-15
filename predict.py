@@ -104,22 +104,26 @@ def get_manure_guidance():
 # ---------------- DB FUNCTIONS ----------------
 def save_waste_analysis(waste_type, confidence, status, message):
     conn = get_connection()
+    if not conn:
+        return
     cursor = conn.cursor()
     cursor.execute("""
         INSERT INTO waste_analysis (waste_type, confidence, status, message)
         VALUES (%s, %s, %s, %s)
     """, (waste_type, confidence, status, message))
-    conn.commit()
+    cursor.close()
     conn.close()
 
 def save_manure_guidance(waste_name, compost_method, preparation_time, nutrients, suitable_crops):
     conn = get_connection()
+    if not conn:
+        return
     cursor = conn.cursor()
     cursor.execute("""
         INSERT INTO manure_guidance (waste_name, compost_method, preparation_time, nutrients, suitable_crops)
         VALUES (%s, %s, %s, %s, %s)
     """, (waste_name, compost_method, preparation_time, nutrients, suitable_crops))
-    conn.commit()
+    cursor.close()
     conn.close()
 
 # ================= WASTE CLASSIFICATION API =================

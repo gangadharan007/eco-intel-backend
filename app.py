@@ -23,9 +23,19 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # CORS for frontend -> backend /api/*
+DEFAULT_ALLOWED_ORIGINS = [
+    "https://eco-intel-frontend.vercel.app",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+extra_origins = [o.strip() for o in os.environ.get("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+allowed_origins = list(dict.fromkeys(DEFAULT_ALLOWED_ORIGINS + extra_origins))
+
 CORS(
     app,
-    resources={r"/api/*": {"origins": "https://eco-intel-frontend.vercel.app"}},
+    resources={r"/api/*": {"origins": allowed_origins}},
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
     supports_credentials=False,
 )
 
@@ -125,11 +135,11 @@ def get_db_connection():
             return _conn_from_mysql_url(mysql_url)
 
         return mysql.connector.connect(
-            host=os.environ.get("MYSQL_HOST"),
+            host=os.environ.get("MYSQL_HOST", "localhost"),
             port=int(os.environ.get("MYSQL_PORT", 3306)),
-            user=os.environ.get("MYSQL_USER"),
+            user=os.environ.get("MYSQL_USER", "root"),
             password=os.environ.get("MYSQL_PASSWORD"),
-            database=os.environ.get("MYSQL_DATABASE"),
+            database=os.environ.get("MYSQL_DATABASE", "eco_intel_ai"),
             autocommit=True,
         )
     except Error as e:
@@ -141,50 +151,144 @@ def get_db_connection():
 
 
 # ---------------- DB Save Helpers ----------------
-def save_carbon_footprint(carbon_value: float):
+def ensure_tables_exist():
+    conn = get_db_connection()
+    if not conn:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS carbon_footprint (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                fertilizer FLOAT,
+                diesel FLOAT,
+                electricity FLOAT,
+                total_co2 FLOAT,
+                status VARCHAR(50),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS crop_recommendation (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                location VARCHAR(100),
+                temperature FLOAT,
+                rainfall FLOAT,
+                soil VARCHAR(50),
+                season VARCHAR(50),
+                recommended_crops TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS manure_guidance (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                waste_name VARCHAR(100),
+                compost_method VARCHAR(200),
+                preparation_time VARCHAR(50),
+                nutrients VARCHAR(200),
+                suitable_crops VARCHAR(200)
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS profit_estimator (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                total_cost FLOAT,
+                revenue FLOAT,
+                profit FLOAT,
+                risk VARCHAR(50),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS waste_analysis (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                waste_type VARCHAR(50),
+                confidence FLOAT,
+                status VARCHAR(50),
+                message VARCHAR(255),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        cur.close()
+        logger.info("DB tables are ready")
+        return True
+    except Exception as e:
+        logger.error("Table init error: %s", e)
+        return False
+    finally:
+        conn.close()
+
+
+def save_carbon_footprint(fertilizer: float, diesel: float, electricity: float, total_co2: float, status: str):
     try:
         conn = get_db_connection()
         if not conn:
             return
         cur = conn.cursor()
-        cur.execute("INSERT INTO carbon_footprint (carbon_value) VALUES (%s)", (carbon_value,))
+        cur.execute(
+            """
+            INSERT INTO carbon_footprint (fertilizer, diesel, electricity, total_co2, status)
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            (fertilizer, diesel, electricity, total_co2, status),
+        )
         cur.close()
         conn.close()
-        logger.info("✅ Saved carbon: %s", carbon_value)
+        logger.info("Saved carbon footprint: total_co2=%s", total_co2)
     except Exception as e:
         logger.error("Carbon save error: %s", e)
 
-def save_waste_data(waste_type: str, waste_amount: float):
+
+def save_waste_analysis(waste_type: str, confidence: float, status: str, message: str):
     try:
         conn = get_db_connection()
         if not conn:
             return
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO waste_data (waste_type, waste_amount) VALUES (%s, %s)",
-            (waste_type, waste_amount),
+            """
+            INSERT INTO waste_analysis (waste_type, confidence, status, message)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (waste_type, confidence, status, message),
         )
         cur.close()
         conn.close()
-        logger.info("✅ Saved waste: %s", waste_type)
+        logger.info("Saved waste analysis: waste_type=%s", waste_type)
     except Exception as e:
         logger.error("Waste save error: %s", e)
 
-def save_profit_metrics(revenue: float, profit_margin: float):
+
+def save_profit_estimator(total_cost: float, revenue: float, profit: float, risk: str):
     try:
         conn = get_db_connection()
         if not conn:
             return
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO profit_metrics (revenue, profit_margin) VALUES (%s, %s)",
-            (revenue, profit_margin),
+            """
+            INSERT INTO profit_estimator (total_cost, revenue, profit, risk)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (total_cost, revenue, profit, risk),
         )
         cur.close()
         conn.close()
-        logger.info("✅ Saved profit: %s", revenue)
+        logger.info("Saved profit estimator: revenue=%s", revenue)
     except Exception as e:
         logger.error("Profit save error: %s", e)
+
 
 def save_crop_recommendation(location: str, soil: str, season: str, avg_temp_30d: float, rain_30d: float, humidity: int, crops: list):
     try:
@@ -193,17 +297,17 @@ def save_crop_recommendation(location: str, soil: str, season: str, avg_temp_30d
             return
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO crop_recommendations (location, soil, season, avg_temp_30d, rain_30d_mm, humidity, crops_json) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s)",
-            (location, soil, season, avg_temp_30d, rain_30d, humidity, str(crops)),
+            """
+            INSERT INTO crop_recommendation (location, temperature, rainfall, soil, season, recommended_crops)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (location, avg_temp_30d, rain_30d, soil, season, ", ".join(crops)),
         )
         cur.close()
         conn.close()
-        logger.info("✅ Saved crop recommendation to DB")
-    except Exception:
-        pass
-
-
+        logger.info("Saved crop recommendation to DB")
+    except Exception as e:
+        logger.error("Crop recommendation save error: %s", e)
 # ---------------- Weather + Geo Helpers ----------------
 def fetch_weather(city: str):
     if not WEATHER_API_KEY:
@@ -427,6 +531,8 @@ def recommend_ecocrop(avg_temp_30d, rain_30d, soil=None, season=None, top_n=6):
     return uniq, None
 
 
+ensure_tables_exist()
+
 
 # ---------------- Routes ----------------
 @app.get("/")
@@ -450,9 +556,11 @@ def db_health():
         cur = conn.cursor()
         cur.execute("SELECT 1")
         row = cur.fetchone()
+        cur.execute("SELECT DATABASE()")
+        db_name = cur.fetchone()
         cur.close()
         conn.close()
-        return jsonify({"ok": row == (1,)})
+        return jsonify({"ok": row == (1,), "database": db_name[0] if db_name else None})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -476,7 +584,13 @@ def carbon_footprint():
             "Optimize tractor routes to save diesel",
         ]
 
-        save_carbon_footprint(total_co2)
+        save_carbon_footprint(
+            fertilizer=fertilizer,
+            diesel=diesel,
+            electricity=electricity,
+            total_co2=total_co2,
+            status=status,
+        )
 
         return jsonify(
             {
@@ -524,8 +638,10 @@ def waste_route():
         if not waste_type:
             return jsonify({"error": "waste_type is required (or set WASTE_AI_URL and send an image)"}), 400
 
-        save_waste_data(waste_type, waste_amount)
-        return jsonify({"ok": True, "waste_type": waste_type, "waste_amount": waste_amount})
+        status = "manual_input"
+        message = f"Manually recorded waste amount: {waste_amount}"
+        save_waste_analysis(waste_type, None, status, message)
+        return jsonify({"ok": True, "waste_type": waste_type, "waste_amount": waste_amount, "status": status})
     except Exception as e:
         logger.error("Waste error: %s\n%s", str(e), traceback.format_exc())
         return jsonify({"error": str(e)}), 500
@@ -545,7 +661,8 @@ def profit_estimator():
         profit_margin = round((profit / expectedIncome * 100) if expectedIncome else 0, 2)
         status = "Profitable" if profit > 0 else "Loss"
 
-        save_profit_metrics(expectedIncome, profit_margin)
+        risk = "Low" if profit > 0 else "High"
+        save_profit_estimator(total_cost, expectedIncome, profit, risk)
 
         return jsonify(
             {
@@ -698,3 +815,4 @@ def ecocrop_debug():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=False)
+
