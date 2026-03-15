@@ -234,7 +234,7 @@ def save_carbon_footprint(fertilizer: float, diesel: float, electricity: float, 
     try:
         conn = get_db_connection()
         if not conn:
-            return
+            return False
         cur = conn.cursor()
         cur.execute(
             """
@@ -246,15 +246,17 @@ def save_carbon_footprint(fertilizer: float, diesel: float, electricity: float, 
         cur.close()
         conn.close()
         logger.info("Saved carbon footprint: total_co2=%s", total_co2)
+        return True
     except Exception as e:
         logger.error("Carbon save error: %s", e)
+        return False
 
 
 def save_waste_analysis(waste_type: str, confidence: float, status: str, message: str):
     try:
         conn = get_db_connection()
         if not conn:
-            return
+            return False
         cur = conn.cursor()
         cur.execute(
             """
@@ -266,15 +268,17 @@ def save_waste_analysis(waste_type: str, confidence: float, status: str, message
         cur.close()
         conn.close()
         logger.info("Saved waste analysis: waste_type=%s", waste_type)
+        return True
     except Exception as e:
         logger.error("Waste save error: %s", e)
+        return False
 
 
 def save_profit_estimator(total_cost: float, revenue: float, profit: float, risk: str):
     try:
         conn = get_db_connection()
         if not conn:
-            return
+            return False
         cur = conn.cursor()
         cur.execute(
             """
@@ -286,15 +290,17 @@ def save_profit_estimator(total_cost: float, revenue: float, profit: float, risk
         cur.close()
         conn.close()
         logger.info("Saved profit estimator: revenue=%s", revenue)
+        return True
     except Exception as e:
         logger.error("Profit save error: %s", e)
+        return False
 
 
 def save_crop_recommendation(location: str, soil: str, season: str, avg_temp_30d: float, rain_30d: float, humidity: int, crops: list):
     try:
         conn = get_db_connection()
         if not conn:
-            return
+            return False
         cur = conn.cursor()
         cur.execute(
             """
@@ -306,8 +312,10 @@ def save_crop_recommendation(location: str, soil: str, season: str, avg_temp_30d
         cur.close()
         conn.close()
         logger.info("Saved crop recommendation to DB")
+        return True
     except Exception as e:
         logger.error("Crop recommendation save error: %s", e)
+        return False
 # ---------------- Weather + Geo Helpers ----------------
 def fetch_weather(city: str):
     if not WEATHER_API_KEY:
@@ -564,6 +572,31 @@ def db_health():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
+@app.get("/api/db-stats")
+def db_stats():
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"ok": False, "error": "DB connection failed"}), 500
+    try:
+        cur = conn.cursor()
+        tables = [
+            "carbon_footprint",
+            "crop_recommendation",
+            "manure_guidance",
+            "profit_estimator",
+            "waste_analysis",
+        ]
+        counts = {}
+        for t in tables:
+            cur.execute(f"SELECT COUNT(*) FROM {t}")
+            row = cur.fetchone()
+            counts[t] = int(row[0]) if row else 0
+        cur.close()
+        conn.close()
+        return jsonify({"ok": True, "counts": counts})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
 @app.post("/api/carbon")
 def carbon_footprint():
     try:
@@ -584,13 +617,15 @@ def carbon_footprint():
             "Optimize tractor routes to save diesel",
         ]
 
-        save_carbon_footprint(
+        saved = save_carbon_footprint(
             fertilizer=fertilizer,
             diesel=diesel,
             electricity=electricity,
             total_co2=total_co2,
             status=status,
         )
+        if not saved:
+            return jsonify({"error": "DB save failed for carbon_footprint"}), 500
 
         return jsonify(
             {
@@ -640,7 +675,9 @@ def waste_route():
 
         status = "manual_input"
         message = f"Manually recorded waste amount: {waste_amount}"
-        save_waste_analysis(waste_type, None, status, message)
+        saved = save_waste_analysis(waste_type, None, status, message)
+        if not saved:
+            return jsonify({"error": "DB save failed for waste_analysis"}), 500
         return jsonify({"ok": True, "waste_type": waste_type, "waste_amount": waste_amount, "status": status})
     except Exception as e:
         logger.error("Waste error: %s\n%s", str(e), traceback.format_exc())
@@ -662,7 +699,9 @@ def profit_estimator():
         status = "Profitable" if profit > 0 else "Loss"
 
         risk = "Low" if profit > 0 else "High"
-        save_profit_estimator(total_cost, expectedIncome, profit, risk)
+        saved = save_profit_estimator(total_cost, expectedIncome, profit, risk)
+        if not saved:
+            return jsonify({"error": "DB save failed for profit_estimator"}), 500
 
         return jsonify(
             {
@@ -729,7 +768,7 @@ def crop_recommend():
                 for x in top
             ]
 
-        save_crop_recommendation(
+        saved = save_crop_recommendation(
             location=location,
             soil=soil,
             season=season,
@@ -738,6 +777,8 @@ def crop_recommend():
             humidity=int(weather.get("humidity") or 0),
             crops=crops,
         )
+        if not saved:
+            return jsonify({"error": "DB save failed for crop_recommendation"}), 500
 
         resp = {
             "location": location,

@@ -103,28 +103,36 @@ def get_manure_guidance():
 
 # ---------------- DB FUNCTIONS ----------------
 def save_waste_analysis(waste_type, confidence, status, message):
-    conn = get_connection()
-    if not conn:
-        return
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO waste_analysis (waste_type, confidence, status, message)
-        VALUES (%s, %s, %s, %s)
-    """, (waste_type, confidence, status, message))
-    cursor.close()
-    conn.close()
+    try:
+        conn = get_connection()
+        if not conn:
+            return False
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO waste_analysis (waste_type, confidence, status, message)
+            VALUES (%s, %s, %s, %s)
+        """, (waste_type, confidence, status, message))
+        cursor.close()
+        conn.close()
+        return True
+    except Exception:
+        return False
 
 def save_manure_guidance(waste_name, compost_method, preparation_time, nutrients, suitable_crops):
-    conn = get_connection()
-    if not conn:
-        return
-    cursor = conn.cursor()
-    cursor.execute("""
-        INSERT INTO manure_guidance (waste_name, compost_method, preparation_time, nutrients, suitable_crops)
-        VALUES (%s, %s, %s, %s, %s)
-    """, (waste_name, compost_method, preparation_time, nutrients, suitable_crops))
-    cursor.close()
-    conn.close()
+    try:
+        conn = get_connection()
+        if not conn:
+            return False
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO manure_guidance (waste_name, compost_method, preparation_time, nutrients, suitable_crops)
+            VALUES (%s, %s, %s, %s, %s)
+        """, (waste_name, compost_method, preparation_time, nutrients, suitable_crops))
+        cursor.close()
+        conn.close()
+        return True
+    except Exception:
+        return False
 
 # ================= WASTE CLASSIFICATION API =================
 @app.route("/predict", methods=["POST"])
@@ -158,16 +166,20 @@ def predict_waste():
             manure_guidance = get_manure_guidance()
             # Save to manure_guidance table
             guidance = manure_guidance[0]
-            save_manure_guidance(
+            manure_saved = save_manure_guidance(
                 guidance["waste_name"],
                 guidance["compost_method"],
                 guidance["preparation_time"],
                 guidance["nutrients"],
                 guidance["suitable_crops"]
             )
+            if not manure_saved:
+                return jsonify({"error": "DB save failed for manure_guidance"}), 500
         
         # Save to waste_analysis table
-        save_waste_analysis(predicted_class, confidence, rule_result["status"], rule_result["message"])
+        waste_saved = save_waste_analysis(predicted_class, confidence, rule_result["status"], rule_result["message"])
+        if not waste_saved:
+            return jsonify({"error": "DB save failed for waste_analysis"}), 500
         
         # Complete response
         response = {
