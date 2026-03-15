@@ -18,6 +18,8 @@ CLASS_NAMES = ["hazardous", "organic", "recyclable"]
 
 # ================= WEATHER CONFIG =================
 WEATHER_API_KEY = os.getenv("WEATHER_API_KEY", "dfa03052a6ec019c943a7889fb20b8fe")
+MIN_WASTE_CONFIDENCE = float(os.getenv("MIN_WASTE_CONFIDENCE", "80"))
+MIN_CLASS_MARGIN = float(os.getenv("MIN_CLASS_MARGIN", "20"))
 
 # ---------------- IMAGE PREPROCESSING ----------------
 def preprocess_image(image_file):
@@ -27,6 +29,33 @@ def preprocess_image(image_file):
     img = np.array(img) / 255.0
     img = np.expand_dims(img, axis=0)
     return img
+
+
+def validate_waste_candidate(prediction):
+    """
+    Reject likely non-waste/out-of-domain images using confidence + class-separation checks.
+    """
+    probs = prediction[0]
+    top_idx = int(np.argmax(probs))
+    top_conf = float(probs[top_idx]) * 100.0
+
+    sorted_probs = np.sort(probs)[::-1]
+    second_conf = float(sorted_probs[1]) * 100.0 if len(sorted_probs) > 1 else 0.0
+    margin = top_conf - second_conf
+
+    if top_conf < MIN_WASTE_CONFIDENCE:
+        return False, top_idx, round(top_conf, 2), {
+            "status": "not_waste",
+            "message": f"Image does not look like supported waste. Confidence too low ({round(top_conf, 2)}%).",
+        }
+
+    if margin < MIN_CLASS_MARGIN:
+        return False, top_idx, round(top_conf, 2), {
+            "status": "not_waste",
+            "message": "Image is ambiguous or likely outside waste categories. Please upload a clear waste image.",
+        }
+
+    return True, top_idx, round(top_conf, 2), None
 
 # ---------------- RULE ENGINE ----------------
 def apply_rules(waste_type, confidence):
@@ -147,14 +176,29 @@ def predict_waste():
     try:
         # Reset file pointer
         file.seek(0)
+
+        # Basic file-level validation
+        if not (file.mimetype or "").startswith("image/"):
+            return jsonify({"error": "Only image files are allowed"}), 400
         
         # Process image
         img = preprocess_image(file)
         
         # Predict
         prediction = model.predict(img, verbose=0)
-        predicted_class = CLASS_NAMES[np.argmax(prediction)]
-        confidence = round(float(np.max(prediction)) * 100, 2)
+        is_valid, top_idx, confidence, validation_error = validate_waste_candidate(prediction)
+        predicted_class = CLASS_NAMES[top_idx]
+
+        if not is_valid:
+            save_waste_analysis("unknown", confidence, validation_error["status"], validation_error["message"])
+            return jsonify(
+                {
+                    "predicted_waste_type": predicted_class,
+                    "confidence": confidence,
+                    "status": validation_error["status"],
+                    "message": validation_error["message"],
+                }
+            ), 422
         
         # Apply rules
         rule_result = apply_rules(predicted_class, confidence)
